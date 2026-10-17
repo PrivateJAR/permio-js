@@ -1,6 +1,14 @@
 import type { DescService } from "@bufbuild/protobuf";
 import { createClient, type CallOptions, type Client, type Transport } from "@connectrpc/connect";
 import { createGrpcWebTransport } from "@connectrpc/connect-web";
+import {
+  AccessScopes,
+  inconsistentResponse,
+  scopeKindName,
+  toAccessEntry,
+  type AccessEntry,
+  type AccessScopeInfo,
+} from "./access.js";
 import { validateApiKey, type ApiKeyKind } from "./apikey.js";
 import {
   PermioConfigError,
@@ -16,6 +24,7 @@ import {
   type Permission,
   type Role,
 } from "./gen/proto/permissions/v1/permissions_pb.js";
+import { Groups } from "./groups.js";
 import { paginate, type PageOptions } from "./pagination.js";
 import { assertResourceUri } from "./resource.js";
 import { withResilience, type RetryOptions } from "./transport.js";
@@ -94,6 +103,57 @@ export interface ListAssignmentsParams extends PageOptions, Omit<RequestOptions,
   project?: string;
 }
 
+export interface BatchCheckParams extends RequestOptions {
+  /** The principal whose permissions are checked. */
+  principal: string;
+  /**
+   * Resource URIs to check, each answered separately. More than 100 are split
+   * into several `BatchCheck` calls, sent in parallel.
+   */
+  resources: string[];
+  /** A permission name. */
+  permission?: string;
+  /** Several permission names; a resource is allowed only with all of them. At most 100. */
+  permissions?: string[];
+  /** Project to check in. Defaults to the client's `project`. */
+  project?: string;
+}
+
+/** One resource's result from `batchCheckDetailed`. */
+export interface BatchCheckEntry {
+  resource: string;
+  /** True when the principal holds every requested permission on `resource`. */
+  allowed: boolean;
+  /** The requested permissions the principal lacks on `resource`, in request order. */
+  missing: string[];
+}
+
+export interface ListAccessParams extends PageOptions, Omit<RequestOptions, "signal"> {
+  /** The principal to look up. Access through roles and groups counts. */
+  principal: string;
+  /** The permission to look for. */
+  permission: string;
+  /** Only resources at or below this URI are considered, e.g. `"/docs"`. A `_` segment here is literal. */
+  under: string;
+  /** Project to look in. Defaults to the client's `project`. */
+  project?: string;
+}
+
+export interface WhoHasAccessParams extends PageOptions, Omit<RequestOptions, "signal"> {
+  /** The resource to look at. A `_` segment here is literal. */
+  resource: string;
+  /**
+   * Only count grants that confer this permission, so a principal is listed
+   * exactly when `check()` passes for it through its own grants (or, for
+   * entries with `viaGroup`, through that group). Unset, any grant counts.
+   */
+  permission?: string;
+  /** Also list every member of each listed group, once per group, with `viaGroup` set. */
+  expandGroups?: boolean;
+  /** Project to look in. Defaults to the client's `project`. */
+  project?: string;
+}
+
 // Errors from the raw clients are converted to PermioError subclasses. Every
 // public RPC is unary; any streaming method would be passed through untouched.
 function wrapClient<S extends DescService>(service: S, transport: Transport): Client<S> {
@@ -141,6 +201,8 @@ export class Permio {
   /** Whether the configured key is an opaque `perms_` key or a legacy JWT. */
   readonly apiKeyKind: ApiKeyKind;
   readonly baseUrl: string;
+  /** Groups of principals: create them, manage members, list them. */
+  readonly groups: Groups;
 
   constructor(options: PermioOptions) {
     if (!options || typeof options !== "object") throw new PermioConfigError("permio: options are required");
@@ -175,6 +237,11 @@ export class Permio {
     );
     this.permissions = wrapClient(PermissionsService, transport);
     this.organisations = wrapClient(OrganisationService, transport);
+    this.groups = new Groups({
+      client: this.permissions,
+      resolveProject: (project) => this.resolveProject(project),
+      callOptions: (o) => Permio.callOptions(o),
+    });
   }
 
   private resolveProject(project: string | undefined): string {
@@ -308,5 +375,132 @@ export class Permio {
       (res) => res.assignments,
       params,
     );
+  }
+
+  /**
+   * Checks each resource separately and returns, per resource URI, whether
+   * `principal` holds every requested permission on it. The map has one entry
+   * per distinct resource, in request order. Use it to filter a list you
+   * already have in memory:
+   *
+   * ```ts
+   * const allowed = await permio.batchCheck({ principal, resources: docs.map((d) => resource("docs", d.id)), permission: "docs.read" });
+   * const visible = docs.filter((d) => allowed.get(resource("docs", d.id)));
+   * ```
+   *
+   * @throws PermioPermissionError if the API key lacks `permission.check`.
+   */
+  async batchCheck(params: BatchCheckParams): Promise<Map<string, boolean>> {
+    const entries = await this.batchCheckDetailed(params);
+    return new Map(entries.map((e) => [e.resource, e.allowed]));
+  }
+
+  /** Like `batchCheck`, but returns one entry per resource with the missing permissions. */
+  async batchCheckDetailed(params: BatchCheckParams): Promise<BatchCheckEntry[]> {
+    if (!params?.principal) throw new PermioValidationError("permio: principal is required");
+    if (!Array.isArray(params.resources)) throw new PermioValidationError("permio: resources must be an array");
+    const resourceUris = unique(params.resources);
+    if (resourceUris.length === 0) throw new PermioValidationError("permio: at least one resource is required");
+    resourceUris.forEach(assertResourceUri);
+    const permissions = pick(params.permission, params.permissions, "permission");
+    const projectName = this.resolveProject(params.project);
+    const chunks: string[][] = [];
+    for (let i = 0; i < resourceUris.length; i += 100) chunks.push(resourceUris.slice(i, i + 100));
+    const responses = await Promise.all(
+      chunks.map((chunk) =>
+        this.permissions.batchCheck(
+          { projectName, principalId: params.principal, resourceUris: chunk, permissions },
+          Permio.callOptions(params),
+        ),
+      ),
+    );
+    const byUri = new Map<string, BatchCheckEntry>();
+    for (const res of responses) {
+      for (const r of res.results) {
+        byUri.set(r.resourceUri, {
+          resource: r.resourceUri,
+          allowed: r.allowed && r.missingPermissions.length === 0,
+          missing: r.missingPermissions,
+        });
+      }
+    }
+    // Fail closed: every requested resource must have exactly its own answer.
+    return resourceUris.map((uri) => {
+      const entry = byUri.get(uri);
+      if (!entry) throw inconsistentResponse(`no BatchCheck result for ${JSON.stringify(uri)}`);
+      return entry;
+    });
+  }
+
+  /**
+   * Answers "where may `principal` use `permission` at or below `under`?",
+   * following every page. Use the result to filter lists in your database:
+   * `coversAll` means no filter is needed, `toPrefixes()` gives path prefixes,
+   * `toRegExp()` a regex, and `allows(uri)` tests a single URI.
+   *
+   * ```ts
+   * const access = await permio.listAccess({ principal: userId, permission: "docs.read", under: "/docs" });
+   * const visible = docs.filter((d) => access.allows(resource("docs", d.id)));
+   * ```
+   *
+   * @throws PermioPermissionError unless the API key has `permission.check` on
+   *   `under` and `principal.assignment.get` on the principal.
+   */
+  async listAccess(params: ListAccessParams): Promise<AccessScopes> {
+    if (!params?.principal) throw new PermioValidationError("permio: principal is required");
+    if (!params.permission) throw new PermioValidationError("permio: permission is required");
+    assertResourceUri(params.under);
+    const projectName = this.resolveProject(params.project);
+    let coversAll = false;
+    const scopes: AccessScopeInfo[] = [];
+    for await (const page of paginate(
+      (pagination, signal) =>
+        this.permissions.listAccess(
+          { projectName, principalId: params.principal, permission: params.permission, underUri: params.under, pagination },
+          Permio.callOptions({ ...params, signal }),
+        ),
+      (res) => [res],
+      params,
+    )) {
+      if (page.coversAll) coversAll = true;
+      for (const s of page.scopes) scopes.push({ uri: s.uri, kind: scopeKindName(s.scope) });
+    }
+    return new AccessScopes(params.under, coversAll, scopes);
+  }
+
+  /**
+   * Answers "who has access to `resource`?", following every page. Lists the
+   * principals (groups included, as `group:<slug>`) with a grant on the
+   * resource, an ancestor of it, or a `_` wildcard URI matching it, ordered by
+   * principal ID, with the grants that give the access.
+   *
+   * @throws PermioPermissionError unless the API key has `principal.list` and
+   *   `principal.assignment.list` on the project.
+   */
+  async whoHasAccess(params: WhoHasAccessParams): Promise<AccessEntry[]> {
+    assertResourceUri(params?.resource);
+    if (params.permission !== undefined && params.permission === "") {
+      throw new PermioValidationError("permio: permission must not be empty");
+    }
+    const projectName = this.resolveProject(params.project);
+    const out: AccessEntry[] = [];
+    for await (const p of paginate(
+      (pagination, signal) =>
+        this.permissions.listPrincipalsWithAccess(
+          {
+            projectName,
+            resourceUri: params.resource,
+            expandGroups: params.expandGroups ?? false,
+            pagination,
+            ...(params.permission !== undefined ? { permission: params.permission } : {}),
+          },
+          Permio.callOptions({ ...params, signal }),
+        ),
+      (res) => res.principals,
+      params,
+    )) {
+      out.push(toAccessEntry(p));
+    }
+    return out;
   }
 }

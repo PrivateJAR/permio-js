@@ -4,6 +4,7 @@ TypeScript SDK for [perms.io](https://perms.io), permissions as a service with
 hierarchical resource-URI RBAC.
 
 - One call to ask "may this principal do X on this resource?"
+- Batch checks, groups, and "where can they do X?" queries that turn into database filters
 - Typed errors, retries for idempotent reads, async iterators over list endpoints
 - The full generated API (every RPC of `PermissionsService` and `OrganisationService`) is available as an escape hatch
 - Works in Node 18+, edge runtimes and browsers (gRPC-web over `fetch`)
@@ -116,6 +117,189 @@ checks the basic shape (leading `/`, no empty segments, no whitespace, at most
 2048 bytes); the API enforces the rest, for example no `( ) [ ] { } * + ? | ^ $ \`
 in segments, and answers with a `PermioValidationError`.
 
+## Batch checks
+
+`batchCheck` answers each resource separately, in one call per 100 resources.
+It returns a `Map` from resource URI to `true`/`false`, so filtering a list you
+already have is one line:
+
+```ts
+const uris = docs.map((d) => resource("docs", d.id));
+const allowed = await permio.batchCheck({ principal: userId, resources: uris, permission: "docs.read" });
+const visible = docs.filter((d) => allowed.get(resource("docs", d.id)));
+```
+
+A resource is allowed only if the principal holds every requested permission
+on it (`permission` or `permissions`, up to 100). Duplicate resources are sent
+once; more than 100 are split into parallel calls. When you also want to know
+what is missing, `batchCheckDetailed` returns
+`[{ resource, allowed, missing: ["docs.write"] }, ...]` in request order.
+
+## Groups
+
+A group is a named set of principals in a project. Grant permissions or roles
+to the group's principal ID, `group:<slug>`, and every member holds them.
+`group(slug)` builds that ID. Groups cannot contain groups.
+
+```ts
+import { group } from "permio";
+
+await permio.groups.create("editors", { description: "Can edit every doc" });
+await permio.groups.addMembers("editors", ["alice", "bob"]); // { added: [...], existing: [...] }
+
+await permio.permissions.grantUserPermissionsAndRolesOnResource({
+  projectName: "my-app",
+  userId: group("editors"), // "group:editors"
+  resourceUri: "/docs",
+  permissions: ["docs.write"],
+});
+
+await permio.check({ principal: "alice", resource: "/docs/42", permission: "docs.write" }); // true
+```
+
+| Method | Returns |
+| ------ | ------- |
+| `groups.create(name, { description? })` | `Group`. `AlreadyExists` if the name is taken |
+| `groups.get(name)` | `Group`, or `PermioNotFoundError` |
+| `groups.update(name, { description })` | `Group`. Only the description can change |
+| `groups.delete(name)` | Deletes the group, its memberships and its grants. Resolves even if it did not exist |
+| `groups.list({ search? })` | Async iterator of `Group`, ordered by name |
+| `groups.addMembers(name, principals)` | `{ added, existing }`; up to 100 principals |
+| `groups.removeMembers(name, principals)` | `{ removed, notMembers }`; up to 100 principals |
+| `groups.listMembers(name)` | Async iterator of `GroupMember` (`principalId`, `createdAt`) |
+| `groups.listForPrincipal(principal)` | Async iterator of the `Group`s the principal belongs to |
+
+`name` is the slug (`"editors"`) or the principal ID (`"group:editors"`).
+Slugs are 1–64 lower-case letters, digits and hyphens, and cannot be renamed.
+Every method also takes `project`, `signal`, `timeoutMs` and `headers`; the
+list methods take `pageSize` too.
+
+## Filtering lists
+
+To show a user only the rows they may see, ask once where they have access and
+turn the answer into a database filter, instead of checking row by row.
+
+```ts
+const access = await permio.listAccess({
+  principal: userId,
+  permission: "docs.read",
+  under: "/docs", // only resources at or below this URI are considered
+});
+```
+
+`listAccess` follows every page and returns an `AccessScopes` object:
+
+| Member | Meaning |
+| ------ | ------- |
+| `coversAll` | The principal holds the permission on `under` itself, so on everything below it. No filter needed |
+| `isEmpty` | No access anywhere under `under` |
+| `scopes` | `[{ uri, kind }]`, where `kind` is `"subtree"` (the URI and everything below it), `"pattern"` (each `_` segment matches exactly one segment, then everything below) or `"exact"` (reserved, not returned today) |
+| `allows(uri)` | Whether a URI is covered. Segment-aware: `/docs/1` covers `/docs/1/x` but not `/docs/12` |
+| `toPrefixes()` | The subtree URIs, for prefix filters. Prefixes covered by a shorter one are dropped |
+| `patterns()` / `hasPatterns` | The pattern URIs, which no prefix can express |
+| `toRegExp()` | One anchored `RegExp` matching exactly what `allows()` accepts, patterns included |
+
+A prefix `p` stands for `p` itself and everything below it, so match
+`path = p OR path starts with p + "/"`. A bare "starts with `p`" would let
+`/docs/1` match `/docs/12`. Pattern scopes appear when a grant was made on a URI
+with `_` wildcard segments (such as `/docs/_/comments`); handle them with
+`toRegExp()`, or by filtering candidates with `allows()`.
+
+The answer is about resources at or below `under`. For a URI outside it,
+`allows()` returning `false` means "not asked", not "denied".
+
+### Prisma
+
+Assuming each row stores its resource URI in `path`:
+
+```ts
+let docs: Doc[];
+if (access.coversAll) {
+  docs = await prisma.doc.findMany();
+} else if (!access.hasPatterns) {
+  const prefixes = access.toPrefixes();
+  docs = await prisma.doc.findMany({
+    where: { OR: [{ path: { in: prefixes } }, ...prefixes.map((p) => ({ path: { startsWith: p + "/" } }))] },
+  });
+} else {
+  // Prisma has no portable regex filter: load the candidates under /docs and keep the allowed ones.
+  const candidates = await prisma.doc.findMany({ where: { path: { startsWith: "/docs/" } } });
+  docs = candidates.filter((d) => access.allows(d.path));
+}
+```
+
+If your rows are only identified by an ID and their URI is `/docs/<id>`, the
+prefixes one segment below `under` are the readable IDs (when `hasPatterns` is
+false; a pattern such as `/docs/_` would stand for every doc):
+
+```ts
+const ids = access.toPrefixes().filter((p) => p.split("/").length === 3).map((p) => decodeURIComponent(p.split("/")[2]!));
+const docs = access.coversAll ? await prisma.doc.findMany() : await prisma.doc.findMany({ where: { id: { in: ids } } });
+```
+
+A deeper prefix such as `/docs/7/comments` grants access below doc 7, not to
+doc 7 itself, so it is rightly left out.
+
+### SQL (PostgreSQL)
+
+```ts
+const prefixes = access.toPrefixes();
+const { rows } = access.coversAll
+  ? await pool.query("SELECT * FROM docs")
+  : await pool.query(
+      `SELECT * FROM docs
+        WHERE path = ANY($1::text[])
+           OR EXISTS (SELECT 1 FROM unnest($1::text[]) AS p WHERE starts_with(path, p || '/'))
+           OR ($2::text IS NOT NULL AND path ~ $2)`,
+      [prefixes, access.hasPatterns ? access.toRegExp().source : null],
+    );
+```
+
+Avoid `LIKE p || '%'`: `_` and `%` are wildcards in `LIKE`, and `_` is common in
+IDs, so it would match rows it should not unless you escape them.
+`starts_with` (PostgreSQL 11+) compares literally. `toRegExp().source` is valid
+PostgreSQL regex syntax, so `path ~ $1` alone also works, without index support.
+
+### MongoDB
+
+```ts
+const filter = access.coversAll ? {} : { path: access.toRegExp() };
+const docs = await db.collection("docs").find(filter).toArray();
+```
+
+`toRegExp()` covers subtree, pattern and exact scopes in one anchored regex.
+
+### In memory
+
+```ts
+const visible = docs.filter((d) => access.allows(resource("docs", d.id)));
+```
+
+For a short list you already have, `batchCheck` works too and needs only
+`permission.check` on the API key. `listAccess` also needs
+`principal.assignment.get` on the principal.
+
+## Who has access
+
+`whoHasAccess` lists the principals with a grant on a resource, on an ancestor
+of it, or on a `_` wildcard URI that matches it, following every page:
+
+```ts
+const entries = await permio.whoHasAccess({ resource: "/docs/42", permission: "docs.read", expandGroups: true });
+// [
+//   { principal: "alice", isGroup: false, viaGroup: undefined,
+//     via: [{ resource: "/docs", inherited: true, match: "ancestor", source: { type: "role", id: "r1", name: "viewer" } }] },
+//   { principal: "group:editors", isGroup: true, viaGroup: undefined, via: [...] },
+//   { principal: "bob", isGroup: false, viaGroup: "editors", via: [...] },
+// ]
+```
+
+With `permission`, only grants that confer it count, so a principal is listed
+exactly when `check()` passes for it (directly, or through the group in
+`viaGroup`). Without it, any grant counts. `expandGroups` adds an entry for each
+member of each listed group. Entries are ordered by principal ID. The API key
+needs `principal.list` and `principal.assignment.list` on the project.
+
 ## Express
 
 ```ts
@@ -215,7 +399,7 @@ try {
 
 ### Retries and timeouts
 
-Idempotent reads (`Check`, and every `Get*` and `List*` RPC) are retried on
+Idempotent reads (`Check`, `BatchCheck`, and every `Get*` and `List*` RPC) are retried on
 `Unavailable` and `DeadlineExceeded`, twice by default, with exponential backoff
 and jitter. Writes are never retried. `timeoutMs` on the client applies to each
 attempt; `timeoutMs` on a call is an overall deadline. Aborting `signal` cancels
@@ -278,7 +462,19 @@ const res = await permio.permissions.check({
 What a key may do depends on its access level. A key with check access (the
 default) can run checks and read permissions, roles and principals. Creating,
 updating and deleting permissions and roles, and granting or revoking, needs a
-key with full access.
+key with full access. Pick the level when creating a key:
+
+```ts
+import { organisationv1 } from "permio";
+
+const { apiKey } = await permio.organisations.createAPIKey({
+  organisationId,
+  projectName: "my-app",
+  name: "ci",
+  access: organisationv1.APIKeyAccess.API_KEY_ACCESS_FULL, // or API_KEY_ACCESS_CHECK, the default
+});
+console.log(apiKey?.key, apiKey?.access);
+```
 
 The generated messages are exported as `permissionsv1`, `organisationv1` and
 `paginationv1`, and the service descriptors as `PermissionsService` and

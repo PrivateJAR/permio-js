@@ -8,7 +8,32 @@ export {
   type CheckResult,
   type ListParams,
   type ListAssignmentsParams,
+  type BatchCheckParams,
+  type BatchCheckEntry,
+  type ListAccessParams,
+  type WhoHasAccessParams,
 } from "./client.js";
+export {
+  AccessScopes,
+  WILDCARD_SEGMENT,
+  type AccessScopeInfo,
+  type AccessScopeKindName,
+  type AccessEntry,
+  type AccessGrantInfo,
+  type AccessGrantMatchName,
+} from "./access.js";
+export {
+  Groups,
+  group,
+  GROUP_PRINCIPAL_PREFIX,
+  type GroupRequestOptions,
+  type CreateGroupOptions,
+  type UpdateGroupOptions,
+  type ListGroupsParams,
+  type GroupListOptions,
+  type AddMembersResult,
+  type RemoveMembersResult,
+} from "./groups.js";
 export {
   PermioError,
   PermioConfigError,
