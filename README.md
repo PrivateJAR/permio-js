@@ -321,8 +321,8 @@ npm run build
 npm test
 ```
 
-`src/gen/` is generated from the public protos in the
-[`proto`](https://github.com/PrivateJAR/proto) repository and committed.
+`src/gen/` is generated from Permio's protobuf definitions, which define the
+API (see the [perms.io docs](https://docs.perms.io)), and committed.
 **Never edit it by hand**; regenerate it instead:
 
 ```sh
