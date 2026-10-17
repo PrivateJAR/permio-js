@@ -1,0 +1,23 @@
+# Generates src/gen/ from the public protos in the PrivateJAR/proto repo.
+# Run scripts/generate.sh rather than `buf generate` directly: it lets you point
+# at a different proto checkout (PERMIO_PROTO_DIR) and checks the output.
+version: v2
+clean: true
+inputs:
+  - directory: ../proto
+    # Allowlist of public API files. Internal services (*/internal.proto) must
+    # never be generated into this package. buf resolves these relative to the
+    # working directory, so run it from the repo root.
+    paths:
+      - ../proto/proto/permissions/v1/permissions.proto
+      - ../proto/proto/organisation/v1/organisation.proto
+      - ../proto/proto/pagination/v1/pagination.proto
+plugins:
+  - remote: buf.build/bufbuild/es:v2.16.0
+    out: src/gen
+    # validate/validate.proto and google/api/*.proto are imported by the public
+    # files, so their descriptors have to be generated too.
+    include_imports: true
+    opt:
+      - target=ts
+      - import_extension=js
