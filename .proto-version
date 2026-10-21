@@ -1,4 +1,4 @@
 # The PrivateJAR/proto release that src/gen/ is generated from.
 # Updated by the proto release workflow; checked by permio-js CI.
-version=v0.0.16
-commit=b562b71a5105ca7b24482a3d5becb58c4ba9d2ad
+version=v0.0.17
+commit=dc62aa16da29b282e71744923e01bfc7801490d2
