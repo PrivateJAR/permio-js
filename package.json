@@ -1,6 +1,6 @@
 {
   "name": "permio",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "TypeScript SDK for the perms.io permissions API",
   "license": "MIT",
   "author": "PrivateJAR",
@@ -10,7 +10,15 @@
     "url": "git+https://github.com/PrivateJAR/permio-js.git"
   },
   "homepage": "https://perms.io",
-  "keywords": ["permio", "perms.io", "permissions", "rbac", "authorization", "grpc-web", "connect"],
+  "keywords": [
+    "permio",
+    "perms.io",
+    "permissions",
+    "rbac",
+    "authorization",
+    "grpc-web",
+    "connect"
+  ],
   "sideEffects": false,
   "engines": {
     "node": ">=18"
@@ -31,7 +39,9 @@
     },
     "./package.json": "./package.json"
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "generate": "scripts/generate.sh",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",

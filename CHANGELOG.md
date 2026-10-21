@@ -4,6 +4,15 @@ All notable changes to this package are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the package uses
 [semantic versioning](https://semver.org/).
 
+## 0.2.1
+
+### Changed
+
+- Generated code updated to the v0.0.17 protos. The `createPermission` and
+  `createRole` documentation now states that creating an existing name never
+  clears fields you leave out; only specified fields that differ are changed.
+  No API changes.
+
 ## 0.2.0
 
 Requires a perms.io API that serves the v0.0.16 protos (groups and access
