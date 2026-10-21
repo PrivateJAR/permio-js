@@ -532,6 +532,14 @@ This needs [buf](https://buf.build/docs/installation). Only
 internal services are never included. Everything else in `src/` is written by
 hand.
 
+`.proto-version` records the proto release (tag and commit) that `src/gen/` is
+generated from. CI regenerates from that commit and fails if `src/gen/` differs,
+so update both together. When the protos are released, their release workflow
+regenerates `src/gen/`, updates `.proto-version` and opens a pull request here.
+Merging that pull request does not publish anything. To release, update the
+hand-written code, `CHANGELOG.md` and the `package.json` version as needed,
+then push a matching `vX.Y.Z` tag, which runs the npm publish workflow.
+
 The live smoke test in `test/live.test.ts` runs only when `PERMIO_API_KEY` and
 `PERMIO_BASE_URL` are set, and refuses to run against production:
 
