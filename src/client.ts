@@ -29,15 +29,15 @@ import { paginate, type PageOptions } from "./pagination.js";
 import { assertResourceUri } from "./resource.js";
 import { withResilience, type RetryOptions } from "./transport.js";
 
-/** Production API. Will move to https://api.perms.io. */
-export const DEFAULT_BASE_URL = "https://temp-api.perms.io";
+/** Production API. */
+export const DEFAULT_BASE_URL = "https://api.perms.io";
 /** Development API. */
 export const DEV_BASE_URL = "https://dev-api.perms.io";
 
 export interface PermioOptions {
   /** API key from the dashboard (`perms_…`), or a legacy JWT key. */
   apiKey: string;
-  /** API host. Defaults to production, `https://temp-api.perms.io`. */
+  /** API host. Defaults to production, `https://api.perms.io`. */
   baseUrl?: string;
   /** Default `project_name` for helpers that take a `project`. */
   project?: string;

@@ -57,7 +57,7 @@ A runnable version lives in [`examples/check.mjs`](examples/check.mjs).
 ```ts
 new Permio({
   apiKey: "perms_…",       // required; format and checksum are validated immediately
-  baseUrl: "https://…",    // default https://temp-api.perms.io (production)
+  baseUrl: "https://…",    // default https://api.perms.io (production)
   project: "my-app",       // default project for helpers; can be overridden per call
   timeoutMs: 10_000,       // per attempt; 0 disables
   retries: 2,              // or { maxRetries, baseDelayMs, maxDelayMs }
@@ -67,7 +67,7 @@ new Permio({
 
 | Environment | `baseUrl`                    |
 | ----------- | ---------------------------- |
-| Production  | `https://temp-api.perms.io` (default). This will become `https://api.perms.io`; the default will follow in a future release. |
+| Production  | `https://api.perms.io` (default)                             |
 | Development | `https://dev-api.perms.io` (also exported as `DEV_BASE_URL`) |
 
 Keep API keys on the server. In a browser bundle the key is visible to anyone
