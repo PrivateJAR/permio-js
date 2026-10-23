@@ -516,7 +516,7 @@ describe("gRPC-web transport over fetch", () => {
   });
 
   it("defaults to the production host", () => {
-    expect(new Permio({ apiKey: VALID_KEY }).baseUrl).toBe("https://temp-api.perms.io");
+    expect(new Permio({ apiKey: VALID_KEY }).baseUrl).toBe("https://api.perms.io");
     expect(() => new Permio({ apiKey: VALID_KEY, baseUrl: "dev-api.perms.io" })).toThrow(PermioConfigError);
   });
 });

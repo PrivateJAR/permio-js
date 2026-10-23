@@ -4,6 +4,14 @@ All notable changes to this package are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the package uses
 [semantic versioning](https://semver.org/).
 
+## 0.2.2
+
+### Changed
+
+- The production default is now `https://api.perms.io`. Version 0.2.1 and
+  earlier default to `https://temp-api.perms.io`, which is being retired:
+  upgrade, or pass `baseUrl: "https://api.perms.io"`.
+
 ## 0.2.1
 
 ### Changed
