@@ -16,6 +16,11 @@ All notable changes to this package are documented here. The format follows
   check, batch check, list access, revoke, groups and error mapping. It runs
   whenever `PERMIO_API_KEY` is set (against the dev API by default), and in CI
   when the `PERMIO_DEV_API_KEY` secret is available.
+- `PermioRateLimitError` for `ResourceExhausted` (HTTP 429), with
+  `retryAfterMs` from the server's `google.rpc.RetryInfo` or `Retry-After`.
+- Rate-limited idempotent reads are retried after the server's requested delay
+  when it is within `retries.maxDelayMs`. A `Retry-After` header on
+  `Unavailable` is honoured as the minimum backoff.
 
 ### Changed
 
