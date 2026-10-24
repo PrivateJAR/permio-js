@@ -4,6 +4,16 @@ All notable changes to this package are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the package uses
 [semantic versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- `PermioRateLimitError` for `ResourceExhausted` (HTTP 429), with
+  `retryAfterMs` from the server's `google.rpc.RetryInfo` or `Retry-After`.
+- Rate-limited idempotent reads are retried after the server's requested delay
+  when it is within `retries.maxDelayMs`. A `Retry-After` header on
+  `Unavailable` is honoured as the minimum backoff.
+
 ## 0.2.2
 
 ### Changed
