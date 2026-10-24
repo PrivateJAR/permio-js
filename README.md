@@ -371,6 +371,7 @@ status `Code`, re-exported from this package), `codeName` (for example
 | `PermioNotFoundError`    | `NotFound`, e.g. `getPermission` for a name that does not exist                        |
 | `PermioUnavailableError` | `Unavailable`, including network failures                                              |
 | `PermioTimeoutError`     | `DeadlineExceeded`, including the SDK's own timeouts                                   |
+| `PermioRateLimitError`   | `ResourceExhausted` (HTTP 429): the organisation's check rate limit is used up. `retryAfterMs` is the server's requested delay |
 | `PermioDeniedError`      | Thrown only by `assert()` when the *principal* is not allowed; has `principal` and `missing` |
 
 Anything else is a plain `PermioError` with the matching `code`.
@@ -404,6 +405,13 @@ Idempotent reads (`Check`, `BatchCheck`, and every `Get*` and `List*` RPC) are r
 and jitter. Writes are never retried. `timeoutMs` on the client applies to each
 attempt; `timeoutMs` on a call is an overall deadline. Aborting `signal` cancels
 the call and any pending retry.
+
+Checks are rate limited per organisation (checks per second, by plan). When the
+limit is used up the API returns `ResourceExhausted` with a `google.rpc.RetryInfo`
+delay (and a `Retry-After` header): idempotent reads are retried after that delay
+(plus a little jitter) when it is within `maxDelayMs`, otherwise
+`PermioRateLimitError` is thrown with `retryAfterMs`. A `Retry-After` header on an
+`Unavailable` response is also honoured as the minimum backoff.
 
 ## Listing
 

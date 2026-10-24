@@ -43,6 +43,7 @@ export {
   PermioNotFoundError,
   PermioUnavailableError,
   PermioTimeoutError,
+  PermioRateLimitError,
   PermioDeniedError,
   parseMissingPermissions,
   toPermioError,
