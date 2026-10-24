@@ -1,11 +1,16 @@
 import { Code, ConnectError, type Transport } from "@connectrpc/connect";
+import { serverRetryDelayMs } from "./errors.js";
 
 export interface RetryOptions {
   /** Retries after the first attempt. Default 2. */
   maxRetries?: number;
   /** Delay before the first retry; doubles each time, with jitter. Default 100 ms. */
   baseDelayMs?: number;
-  /** Upper bound for a single delay. Default 2000 ms. */
+  /**
+   * Upper bound for a single delay. Default 2000 ms. A rate-limited read
+   * (ResourceExhausted) is retried after the server's requested delay only when
+   * that delay is within this bound; otherwise `PermioRateLimitError` is thrown.
+   */
   maxDelayMs?: number;
 }
 
@@ -160,9 +165,21 @@ export function withResilience(inner: Transport, opts: ResilienceOptions): Trans
           } catch (e) {
             const err = asConnectError(e);
             if (overall.signal.aborted) throw asConnectError(overall.signal.reason ?? err);
-            if (attempt >= retries || !RETRYABLE_CODES.has(err.code)) throw err;
+            // The server's RetryInfo detail / Retry-After header, if any. A rate
+            // limited (ResourceExhausted) read is only retried when the server
+            // says when, and only if that is within maxDelayMs.
+            const serverDelay = serverRetryDelayMs(err);
+            const retryable =
+              RETRYABLE_CODES.has(err.code) || (err.code === Code.ResourceExhausted && serverDelay !== undefined);
+            if (attempt >= retries || !retryable) throw err;
+            if (serverDelay !== undefined && serverDelay > opts.retry.maxDelayMs) throw err;
             const ceiling = Math.min(opts.retry.maxDelayMs, opts.retry.baseDelayMs * 2 ** attempt);
-            await sleep(ceiling / 2 + Math.random() * (ceiling / 2), overall.signal);
+            const backoff = ceiling / 2 + Math.random() * (ceiling / 2);
+            // Wait at least as long as the server asked, plus a little jitter so
+            // clients limited in the same second don't all retry at once.
+            const delay =
+              serverDelay === undefined ? backoff : Math.max(backoff, serverDelay + Math.random() * Math.min(100, ceiling));
+            await sleep(delay, overall.signal);
           } finally {
             attemptSignal.cleanup();
           }
