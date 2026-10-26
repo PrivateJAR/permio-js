@@ -10,6 +10,9 @@ permissions:
 
 jobs:
   publish:
+    # Stays on a GitHub-hosted runner, unlike ci.yml and generated.yml: npm only
+    # accepts provenance (and trusted publishing) from cloud-hosted runners, and
+    # Blacksmith runners register as self-hosted.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
