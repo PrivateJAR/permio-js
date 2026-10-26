@@ -147,7 +147,7 @@ const visible = docs.filter((d) => allowed.get(resource("docs", d.id)));
 
 A resource is allowed only if the principal holds every requested permission
 on it (`permission` or `permissions`, up to 100). Duplicate resources are sent
-once; more than 100 are split into parallel calls. When you also want to know
+once; more than 100 are split into several calls, at most 4 in flight at once. When you also want to know
 what is missing, `batchCheckDetailed` returns
 `[{ resource, allowed, missing: ["docs.write"] }, ...]` in request order.
 
@@ -589,7 +589,9 @@ then push a matching `vX.Y.Z` tag, which runs the npm publish workflow.
 
 The integration test in `test/live.test.ts` runs only when `PERMIO_API_KEY` is
 set. It needs a full-access key, talks to the development API unless
-`PERMIO_BASE_URL` says otherwise, and refuses to run against production. It
+`PERMIO_BASE_URL` says otherwise, and refuses to run (fails) against anything
+but the development API and local hosts (`localhost`, `127.0.0.1`, `[::1]`,
+`*.localhost`, `*.test`). It
 covers `whoAmI`, grant, check, `batchCheck`, `listAccess`, revoke, a group and
 a bad key, using fixed `sdk-it-js-*` IDs and `sdk-it-js.*` permissions that it
 deletes before and after. The project is the key's own unless

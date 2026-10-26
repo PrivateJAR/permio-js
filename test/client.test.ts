@@ -128,6 +128,19 @@ describe("check helpers", () => {
     );
   });
 
+  it("checkAny fails closed when a denial names nothing missing", async () => {
+    const permio = client((router) =>
+      router.service(PermissionsService, {
+        check() {
+          return { passed: false, missingPermissions: [] };
+        },
+      }),
+    );
+    const p = { principal: "bob", permissions: ["docs.write", "docs.read"] };
+    await expect(permio.checkAny({ ...p, resource: "/docs/1" })).resolves.toBe(false);
+    await expect(permio.checkAny({ ...p, resources: ["/docs/1", "/docs/2"] })).resolves.toBe(false);
+  });
+
   it("works with URIs from resource()", async () => {
     const permio = checker();
     await expect(
@@ -435,19 +448,25 @@ describe("pagination", () => {
     expect(out).toEqual(["alice", "bob", "carol"]);
   });
 
-  it("stops if the server repeats a cursor", async () => {
+  it("throws instead of ending the listing early if the server repeats a cursor", async () => {
+    const cursors = ["a", "b", "a"];
     let calls = 0;
     const permio = client((router) =>
       router.service(PermissionsService, {
         listRoles() {
           calls++;
-          return { roles: [{ id: `r${calls}` }], pagination: { nextCursor: "same" } };
+          return { roles: [{ id: `r${calls}` }], pagination: { nextCursor: cursors[calls - 1] ?? "" } };
         },
       }),
     );
     const ids: string[] = [];
-    for await (const r of permio.listRoles()) ids.push(r.id);
-    expect(ids).toEqual(["r1", "r2"]);
+    const err = await (async () => {
+      for await (const r of permio.listRoles()) ids.push(r.id);
+    })().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PermioError);
+    expect((err as Error).message).toMatch(/inconsistent response.*cursor "a"/);
+    expect(ids).toEqual(["r1", "r2", "r3"]);
+    expect(calls).toBe(3);
   });
 });
 

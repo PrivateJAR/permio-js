@@ -1,3 +1,5 @@
+import { inconsistentResponse } from "./access.js";
+
 /** Largest page the API accepts (`PaginationRequest.limit` is 1..100). */
 export const MAX_PAGE_SIZE = 100;
 
@@ -15,6 +17,8 @@ interface Paginated {
 /**
  * Iterates every item of a list RPC that uses `pagination.PaginationRequest` /
  * `PaginationResponse`, following `next_cursor` until the API returns an empty one.
+ * A cursor the API already returned would loop forever, so it throws a
+ * `PermioError` ("inconsistent response from the API") instead.
  *
  * ```ts
  * for await (const key of paginate(
@@ -36,8 +40,10 @@ export async function* paginate<Res extends Paginated, Item>(
     const res = await fetchPage(cursor === undefined ? { limit } : { limit, cursor }, options.signal);
     yield* items(res);
     const next = res.pagination?.nextCursor ?? "";
-    // An empty cursor ends the listing. A repeated one would loop forever, so stop there too.
-    if (next === "" || seen.has(next)) return;
+    // An empty cursor ends the listing. A repeated one would loop forever, and
+    // stopping quietly would return a truncated listing as if it were complete.
+    if (next === "") return;
+    if (seen.has(next)) throw inconsistentResponse(`pagination cursor ${JSON.stringify(next)} was returned twice`);
     seen.add(next);
     cursor = next;
   }
