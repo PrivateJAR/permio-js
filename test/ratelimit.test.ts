@@ -113,6 +113,46 @@ describe("rate limiting (ResourceExhausted)", () => {
     expect(calls).toBe(1);
   });
 
+  it("never retries grant or revoke, even with a delay", async () => {
+    let grants = 0;
+    let revokes = 0;
+    const permio = client(
+      (router) =>
+        router.service(PermissionsService, {
+          grantUserPermissionsAndRolesOnResource() {
+            grants++;
+            throw rateLimited(10);
+          },
+          revokeUserPermissionsAndRolesOnResource() {
+            revokes++;
+            throw rateLimited(10);
+          },
+        }),
+      { retries: { maxRetries: 2, baseDelayMs: 1, maxDelayMs: 1000 } },
+    );
+    const change = { principal: "alice", resource: "/docs/1", permission: "docs.read" };
+    await expect(permio.grant(change)).rejects.toBeInstanceOf(PermioRateLimitError);
+    await expect(permio.revoke(change)).rejects.toBeInstanceOf(PermioRateLimitError);
+    expect([grants, revokes]).toEqual([1, 1]);
+  });
+
+  it("retries a rate-limited whoAmI (a read)", async () => {
+    let calls = 0;
+    const permio = client(
+      (router) =>
+        router.service(PermissionsService, {
+          whoAmI() {
+            calls++;
+            if (calls === 1) throw rateLimited(5);
+            return { principalId: "key-123", projectName: "my-app" };
+          },
+        }),
+      { retries: { maxRetries: 2, baseDelayMs: 1, maxDelayMs: 1000 } },
+    );
+    await expect(permio.whoAmI()).resolves.toMatchObject({ principalId: "key-123" });
+    expect(calls).toBe(2);
+  });
+
   it("uses Retry-After as the minimum backoff for Unavailable (e.g. an HTTP 429 from a proxy)", async () => {
     const at: number[] = [];
     const permio = client(
