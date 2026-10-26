@@ -549,4 +549,4 @@ PERMIO_API_KEY=perms_… PERMIO_BASE_URL=https://dev-api.perms.io PERMIO_PROJECT
 
 ## License
 
-MIT
+Apache-2.0. See [LICENSE](LICENSE).

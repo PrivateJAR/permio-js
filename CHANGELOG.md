@@ -4,6 +4,13 @@ All notable changes to this package are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the package uses
 [semantic versioning](https://semver.org/).
 
+## Unreleased
+
+### Changed
+
+- The package is now licensed under Apache-2.0 (previously MIT). Releases up
+  to and including 0.2.2 remain available under MIT.
+
 ## 0.2.2
 
 ### Changed
