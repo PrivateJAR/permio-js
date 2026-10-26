@@ -1,6 +1,7 @@
 // Integration test against a real deployment. Skipped unless PERMIO_API_KEY is
-// set. PERMIO_BASE_URL defaults to the development API (DEV_BASE_URL), and the
-// test refuses to run against production because it writes. The key needs full
+// set. PERMIO_BASE_URL defaults to the development API (DEV_BASE_URL). Because
+// it writes, it refuses to run against anything but the development API or a
+// local host (see live-target.ts). The key needs full
 // access to its project (PERMIO_PROJECT, default: the key's project from whoAmI):
 //   PERMIO_API_KEY=perms_... npm test -- test/live.test.ts
 //
@@ -8,12 +9,17 @@
 // before and after the run, so an interrupted run is cleaned up by the next one.
 // Runs sharing a project must not overlap (CI serialises them).
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { DEFAULT_BASE_URL, DEV_BASE_URL, Permio, PermioAuthError, group } from "../src/index.js";
+import { DEV_BASE_URL, Permio, PermioAuthError, group } from "../src/index.js";
+import { isAllowedLiveTarget } from "./live-target.js";
 
 const apiKey = process.env.PERMIO_API_KEY;
 const baseUrl = process.env.PERMIO_BASE_URL || DEV_BASE_URL;
-const isProd = (url: string) =>
-  /^https?:\/\/(temp-)?api\.perms\.io\/?$/.test(url) || url.replace(/\/+$/, "") === DEFAULT_BASE_URL;
+if (apiKey && !isAllowedLiveTarget(baseUrl)) {
+  throw new Error(
+    `refusing to run the live test against ${baseUrl}: it writes, so only ${DEV_BASE_URL} and local hosts ` +
+      "(localhost, 127.0.0.1, [::1], *.localhost, *.test) are allowed",
+  );
+}
 
 const ALICE = "sdk-it-js-alice";
 const BOB = "sdk-it-js-bob";
@@ -25,7 +31,7 @@ const DOCS = `${ROOT}/docs`;
 const DOC1 = `${DOCS}/1`;
 const OTHER = `${ROOT}/other`;
 
-describe.skipIf(!apiKey || isProd(baseUrl))("live integration", { timeout: 30_000 }, () => {
+describe.skipIf(!apiKey)("live integration", { timeout: 30_000 }, () => {
   let permio: Permio;
   let project: string;
 

@@ -110,7 +110,7 @@ export interface BatchCheckParams extends RequestOptions {
   principal: string;
   /**
    * Resource URIs to check, each answered separately. More than 100 are split
-   * into several `BatchCheck` calls, sent in parallel.
+   * into several `BatchCheck` calls, at most 4 in flight at once.
    */
   resources: string[];
   /** A permission name. */
@@ -390,6 +390,9 @@ export class Permio {
   async checkAny(params: CheckParams): Promise<boolean> {
     const { allowed, missing } = await this.checkDetailed(params);
     if (allowed) return true;
+    // Fail closed: a denial that names nothing missing cannot show that any
+    // resource has one of the permissions.
+    if (missing.length === 0) return false;
     const wanted = pick(params.permission, params.permissions, "permission");
     return missing.every((m) => wanted.some((p) => !m.permissions.includes(p)));
   }
@@ -490,12 +493,10 @@ export class Permio {
     const projectName = this.resolveProject(params.project);
     const chunks: string[][] = [];
     for (let i = 0; i < resourceUris.length; i += 100) chunks.push(resourceUris.slice(i, i + 100));
-    const responses = await Promise.all(
-      chunks.map((chunk) =>
-        this.permissions.batchCheck(
-          { projectName, principalId: params.principal, resourceUris: chunk, permissions },
-          Permio.callOptions(params),
-        ),
+    const responses = await mapConcurrent(chunks, BATCH_CHECK_CONCURRENCY, (chunk) =>
+      this.permissions.batchCheck(
+        { projectName, principalId: params.principal, resourceUris: chunk, permissions },
+        Permio.callOptions(params),
       ),
     );
     const byUri = new Map<string, BatchCheckEntry>();
@@ -659,4 +660,31 @@ export class Permio {
       email: res.email || undefined,
     };
   }
+}
+
+/** Most `BatchCheck` calls one `batchCheck` has in flight at once. */
+const BATCH_CHECK_CONCURRENCY = 4;
+
+/**
+ * Like `Promise.all(items.map(fn))`, with at most `limit` calls in flight.
+ * Results keep the order of `items`. After the first failure no new calls start,
+ * and it rejects with that error.
+ */
+async function mapConcurrent<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  let failed = false;
+  async function worker(): Promise<void> {
+    while (!failed && next < items.length) {
+      const i = next++;
+      try {
+        results[i] = await fn(items[i]!);
+      } catch (e) {
+        failed = true;
+        throw e;
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
 }

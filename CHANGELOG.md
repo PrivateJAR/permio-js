@@ -4,7 +4,7 @@ All notable changes to this package are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the package uses
 [semantic versioning](https://semver.org/).
 
-## Unreleased
+## Unreleased (0.3.0)
 
 ### Added
 
@@ -26,6 +26,22 @@ All notable changes to this package are documented here. The format follows
 
 - The package is now licensed under Apache-2.0 (previously MIT). Releases up
   to and including 0.2.2 remain available under MIT.
+- `batchCheck` / `batchCheckDetailed` with more than 100 resources now have at
+  most 4 `BatchCheck` calls in flight at once instead of sending every chunk
+  in parallel. After a call fails, no further chunks are sent.
+
+### Fixed
+
+- `checkAny` failed open: a denial (`passed: false`) with an empty missing
+  list returned `true`. It now returns `false`.
+- A list RPC that returns a cursor it already returned now throws a
+  `PermioError` ("inconsistent response from the API") instead of silently
+  ending the listing, which returned a truncated list as if it were complete.
+- The live integration test's production guard could be bypassed with an
+  explicit port (`https://api.perms.io:443`), upper case or a trailing dot. It
+  now parses the URL and accepts only the development API and local hosts
+  (`localhost`, `127.0.0.1`, `[::1]`, `*.localhost`, `*.test`), and fails
+  instead of skipping when `PERMIO_BASE_URL` is anything else.
 
 ## 0.2.2
 

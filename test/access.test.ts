@@ -317,6 +317,54 @@ describe("batchCheck", () => {
     expect(result.get("/docs/0")).toBe(false);
   });
 
+  it("has at most 4 BatchCheck calls in flight at once, and keeps request order", async () => {
+    let inFlight = 0;
+    let peak = 0;
+    let calls = 0;
+    const permio = client((router) =>
+      router.service(PermissionsService, {
+        async batchCheck(req) {
+          calls++;
+          inFlight++;
+          peak = Math.max(peak, inFlight);
+          // Finish out of order so the result order has to be restored.
+          await new Promise((r) => setTimeout(r, 5 + (calls % 3) * 5));
+          inFlight--;
+          return { results: req.resourceUris.map((uri) => ({ resourceUri: uri, allowed: uri.endsWith("7") })) };
+        },
+      }),
+    );
+    const resources = Array.from({ length: 1000 }, (_, i) => `/docs/${i}`);
+    const result = await permio.batchCheck({ principal: "alice", resources, permission: "docs.read" });
+    expect(calls).toBe(10);
+    expect(peak).toBe(4);
+    expect([...result.keys()]).toEqual(resources);
+    expect(result.get("/docs/917")).toBe(true);
+    expect(result.get("/docs/918")).toBe(false);
+  });
+
+  it("stops starting BatchCheck calls after one fails", async () => {
+    let calls = 0;
+    const permio = client(
+      (router) =>
+        router.service(PermissionsService, {
+          async batchCheck(req) {
+            calls++;
+            if (calls === 1) throw new ConnectError("no", Code.PermissionDenied);
+            await new Promise((r) => setTimeout(r, 5));
+            return { results: req.resourceUris.map((uri) => ({ resourceUri: uri, allowed: true })) };
+          },
+        }),
+      { retries: 0 },
+    );
+    const resources = Array.from({ length: 1000 }, (_, i) => `/docs/${i}`);
+    await expect(permio.batchCheck({ principal: "alice", resources, permission: "docs.read" })).rejects.toBeInstanceOf(
+      PermioPermissionError,
+    );
+    await new Promise((r) => setTimeout(r, 30));
+    expect(calls).toBe(4);
+  });
+
   it("fails closed when a result is missing", async () => {
     const permio = client((router) =>
       router.service(PermissionsService, {
