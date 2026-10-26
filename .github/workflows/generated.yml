@@ -12,9 +12,9 @@ jobs:
   # fails if the committed code differs, so src/gen/ is never edited by hand
   # and always matches a real proto release.
   check:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
-      - uses: actions/checkout@v4
+      - uses: useblacksmith/checkout@v1
 
       - name: Read the pinned proto version
         id: pin
@@ -38,13 +38,23 @@ jobs:
 
       - name: Checkout the pinned protos
         if: steps.pin.outputs.enabled == 'true'
-        uses: actions/checkout@v4
+        uses: useblacksmith/checkout@v1
         with:
           repository: PrivateJAR/proto
           ref: ${{ steps.pin.outputs.commit }}
           ssh-key: ${{ secrets.PROTO_DEPLOY_KEY }}
           path: .proto-src
           persist-credentials: false
+
+      # buf-setup-action looks in the runner tool cache before downloading, so
+      # restoring that directory from the (Blacksmith-backed) actions cache
+      # skips the download on warm runs.
+      - name: Cache Buf
+        if: steps.pin.outputs.enabled == 'true'
+        uses: actions/cache@v5
+        with:
+          path: ${{ runner.tool_cache }}/buf/1.74.0
+          key: buf-1.74.0-${{ runner.os }}-${{ runner.arch }}
 
       - name: Setup Buf
         if: steps.pin.outputs.enabled == 'true'
