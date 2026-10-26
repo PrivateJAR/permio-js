@@ -1,3 +1,6 @@
+import { fromBinary } from "@bufbuild/protobuf";
+import { BinaryReader, WireType } from "@bufbuild/protobuf/wire";
+import { DurationSchema } from "@bufbuild/protobuf/wkt";
 import { Code, ConnectError } from "@connectrpc/connect";
 
 /** Permissions missing on one resource. */
@@ -90,6 +93,62 @@ export class PermioUnavailableError extends PermioError {
   override name = "PermioUnavailableError";
 }
 
+/**
+ * The organisation's check rate limit (checks per second) is used up (gRPC
+ * ResourceExhausted, HTTP 429). Idempotent reads are retried automatically
+ * after the server's requested delay when it is within `retries.maxDelayMs`;
+ * otherwise this is thrown with `retryAfterMs` set to that delay.
+ */
+export class PermioRateLimitError extends PermioError {
+  override name = "PermioRateLimitError";
+  /** How long the server asked the client to wait before retrying, if it said. */
+  readonly retryAfterMs: number | undefined;
+
+  constructor(message: string, options: PermioErrorOptions & { retryAfterMs?: number | undefined } = {}) {
+    super(message, options);
+    this.retryAfterMs = options.retryAfterMs;
+  }
+}
+
+const RETRY_INFO_TYPE = "google.rpc.RetryInfo";
+
+/** Decodes a google.rpc.RetryInfo message (field 1: google.protobuf.Duration retry_delay) into milliseconds. */
+function decodeRetryInfoMs(bytes: Uint8Array): number | undefined {
+  try {
+    const reader = new BinaryReader(bytes);
+    while (reader.pos < reader.len) {
+      const [fieldNo, wireType] = reader.tag();
+      if (fieldNo === 1 && wireType === WireType.LengthDelimited) {
+        const delay = fromBinary(DurationSchema, reader.bytes());
+        return Math.max(0, Number(delay.seconds) * 1000 + Math.ceil(delay.nanos / 1e6));
+      }
+      reader.skip(wireType);
+    }
+  } catch {
+    // Malformed detail: ignore it.
+  }
+  return undefined;
+}
+
+/**
+ * How long the server asked the client to wait before retrying, in ms: a
+ * `google.rpc.RetryInfo` error detail, else a `Retry-After` header (seconds or
+ * an HTTP date). Undefined when it gave no delay.
+ */
+export function serverRetryDelayMs(error: ConnectError): number | undefined {
+  for (const detail of error.details) {
+    if ("type" in detail && detail.type === RETRY_INFO_TYPE) {
+      const ms = decodeRetryInfoMs(detail.value);
+      if (ms !== undefined) return ms;
+    }
+  }
+  const header = error.metadata.get("retry-after")?.trim();
+  if (!header) return undefined;
+  if (/^\d+$/.test(header)) return Number(header) * 1000;
+  const date = Date.parse(header);
+  return Number.isNaN(date) ? undefined : Math.max(0, date - Date.now());
+}
+
 /** The call did not finish in time (gRPC DeadlineExceeded). */
 export class PermioTimeoutError extends PermioError {
   override name = "PermioTimeoutError";
@@ -146,6 +205,8 @@ export function toPermioError(error: unknown): PermioError {
       return new PermioUnavailableError(message, options);
     case Code.DeadlineExceeded:
       return new PermioTimeoutError(message, options);
+    case Code.ResourceExhausted:
+      return new PermioRateLimitError(message, { ...options, retryAfterMs: serverRetryDelayMs(ce) });
     default:
       return new PermioError(message, options);
   }
