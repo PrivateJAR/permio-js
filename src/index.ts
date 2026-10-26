@@ -12,6 +12,11 @@ export {
   type BatchCheckEntry,
   type ListAccessParams,
   type WhoHasAccessParams,
+  type GrantParams,
+  type RevokeParams,
+  type WhoAmI,
+  type PrincipalKind,
+  type ApiKeyAccessLevel,
 } from "./client.js";
 export {
   AccessScopes,

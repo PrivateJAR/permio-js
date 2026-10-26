@@ -19,6 +19,11 @@ export interface ResilienceOptions {
 // Read-only RPCs that are safe to repeat. Anything not listed (every Create,
 // Update, Delete, Grant, Revoke, Invite, Set, Invalidate, Remove...) is sent
 // exactly once.
+//
+// Grant and Revoke converge on the server (a grant is additive, a revoke
+// ignores names the grant lacks), but they stay off this list: after a timeout
+// the first attempt may still land, and repeating it could undo another
+// caller's revoke or grant made in between. The caller decides instead.
 const IDEMPOTENT_METHODS = new Set([
   "permio.permissions.v1.PermissionsService.Check",
   "permio.permissions.v1.PermissionsService.GetPermission",
@@ -36,6 +41,7 @@ const IDEMPOTENT_METHODS = new Set([
   "permio.permissions.v1.PermissionsService.ListGroups",
   "permio.permissions.v1.PermissionsService.ListGroupMembers",
   "permio.permissions.v1.PermissionsService.ListGroupsForPrincipal",
+  "permio.permissions.v1.PermissionsService.WhoAmI",
   "permio.organisation.v1.OrganisationService.GetOrganisation",
   "permio.organisation.v1.OrganisationService.GetUsersOrganisation",
   "permio.organisation.v1.OrganisationService.ListAPIKeys",

@@ -4,7 +4,7 @@ TypeScript SDK for [perms.io](https://perms.io), permissions as a service with
 hierarchical resource-URI RBAC.
 
 - One call to ask "may this principal do X on this resource?"
-- Batch checks, groups, and "where can they do X?" queries that turn into database filters
+- Batch checks, grant and revoke, groups, and "where can they do X?" queries that turn into database filters
 - Typed errors, retries for idempotent reads, async iterators over list endpoints
 - The full generated API (every RPC of `PermissionsService` and `OrganisationService`) is available as an escape hatch
 - Works in Node 18+, edge runtimes and browsers (gRPC-web over `fetch`)
@@ -24,8 +24,10 @@ Keys look like `perms_` followed by 38 letters and digits.
 
 **2. Grant something to check.** In the dashboard, create a permission (say
 `docs.read`) and grant it to a principal (say `alice`) on a resource
-(say `/docs/42`). Principal IDs are your own identifiers: user IDs, service
-names, anything stable.
+(say `/docs/42`), or grant it from code with `permio.grant()` and a
+full-access key (see [Granting and revoking](#granting-and-revoking)).
+Principal IDs are your own identifiers: user IDs, service names, anything
+stable.
 
 **3. Check it.**
 
@@ -72,6 +74,20 @@ new Permio({
 
 Keep API keys on the server. In a browser bundle the key is visible to anyone
 who loads the page.
+
+To confirm a key works and see what it is, call `whoAmI()`. It needs no
+`project`:
+
+```ts
+const me = await permio.whoAmI();
+// { principalId: "…", organisationId: "…", kind: "api_key", project: "my-app", apiKeyAccess: "full", email: undefined }
+```
+
+`kind` is `"api_key"`, `"user"`, `"service_account"` or `"unknown"`. For an API
+key, `project` is the only project it can be used in and `apiKeyAccess` is
+`"check"` (checks and reads), `"full"` (also writes, including grant and
+revoke) or `"unknown"` (rights changed by hand). An unknown or invalidated key
+throws `PermioAuthError`.
 
 ## Checking permissions
 
@@ -135,6 +151,34 @@ once; more than 100 are split into parallel calls. When you also want to know
 what is missing, `batchCheckDetailed` returns
 `[{ resource, allowed, missing: ["docs.write"] }, ...]` in request order.
 
+## Granting and revoking
+
+`grant` gives a principal permissions and roles (by role ID) on a resource URI,
+and so on everything below it. It is additive: what the principal already holds
+there is kept. `revoke` removes them from the grant on exactly that URI.
+
+```ts
+await permio.grant({ principal: "alice", resource: resource("docs", 42), permission: "docs.read" });
+await permio.grant({ principal: "alice", resource: "/docs", permissions: ["docs.read", "docs.write"], roles: [editorRoleId] });
+
+await permio.revoke({ principal: "alice", resource: "/docs", permission: "docs.write" });
+```
+
+Each call takes `principal`, `resource`, at least one of `permission`,
+`permissions`, `role` or `roles`, and the usual `project`, `signal`,
+`timeoutMs` and `headers`. Both need a key with full access.
+
+- Every permission and role must already exist in the project, or `grant`
+  throws `PermioValidationError`.
+- `revoke` ignores names the grant does not hold, and does not touch grants on
+  other URIs. A grant on an ancestor (say `/docs` when you revoke on `/docs/42`)
+  still applies, so the principal can still pass `check`; use `whoHasAccess` to
+  see where access comes from.
+- Like every write, `grant` and `revoke` are sent once and never retried
+  automatically. Both converge if repeated, so it is safe to call them again
+  yourself after a `PermioUnavailableError` or `PermioTimeoutError`, but doing
+  it blindly could undo a change someone else made in between.
+
 ## Groups
 
 A group is a named set of principals in a project. Grant permissions or roles
@@ -147,12 +191,7 @@ import { group } from "permio";
 await permio.groups.create("editors", { description: "Can edit every doc" });
 await permio.groups.addMembers("editors", ["alice", "bob"]); // { added: [...], existing: [...] }
 
-await permio.permissions.grantUserPermissionsAndRolesOnResource({
-  projectName: "my-app",
-  userId: group("editors"), // "group:editors"
-  resourceUri: "/docs",
-  permissions: ["docs.write"],
-});
+await permio.grant({ principal: group("editors"), resource: "/docs", permission: "docs.write" }); // "group:editors"
 
 await permio.check({ principal: "alice", resource: "/docs/42", permission: "docs.write" }); // true
 ```
@@ -399,9 +438,9 @@ try {
 
 ### Retries and timeouts
 
-Idempotent reads (`Check`, `BatchCheck`, and every `Get*` and `List*` RPC) are retried on
+Idempotent reads (`Check`, `BatchCheck`, `WhoAmI`, and every `Get*` and `List*` RPC) are retried on
 `Unavailable` and `DeadlineExceeded`, twice by default, with exponential backoff
-and jitter. Writes are never retried. `timeoutMs` on the client applies to each
+and jitter. Writes, including `grant` and `revoke`, are never retried. `timeoutMs` on the client applies to each
 attempt; `timeoutMs` on a call is an overall deadline. Aborting `signal` cancels
 the call and any pending retry.
 
@@ -540,12 +579,20 @@ Merging that pull request does not publish anything. To release, update the
 hand-written code, `CHANGELOG.md` and the `package.json` version as needed,
 then push a matching `vX.Y.Z` tag, which runs the npm publish workflow.
 
-The live smoke test in `test/live.test.ts` runs only when `PERMIO_API_KEY` and
-`PERMIO_BASE_URL` are set, and refuses to run against production:
+The integration test in `test/live.test.ts` runs only when `PERMIO_API_KEY` is
+set. It needs a full-access key, talks to the development API unless
+`PERMIO_BASE_URL` says otherwise, and refuses to run against production. It
+covers `whoAmI`, grant, check, `batchCheck`, `listAccess`, revoke, a group and
+a bad key, using fixed `sdk-it-js-*` IDs and `sdk-it-js.*` permissions that it
+deletes before and after. The project is the key's own unless
+`PERMIO_PROJECT` is set:
 
 ```sh
-PERMIO_API_KEY=perms_… PERMIO_BASE_URL=https://dev-api.perms.io PERMIO_PROJECT=my-app npm test
+PERMIO_API_KEY=perms_… npx vitest run test/live.test.ts
 ```
+
+CI runs it in the `integration` job when the `PERMIO_DEV_API_KEY` secret is
+set, and skips it otherwise.
 
 ## License
 

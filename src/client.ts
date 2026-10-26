@@ -19,7 +19,9 @@ import {
 } from "./errors.js";
 import { OrganisationService } from "./gen/proto/organisation/v1/organisation_pb.js";
 import {
+  APIKeyAccess,
   PermissionsService,
+  PrincipalType,
   type Assignment,
   type Permission,
   type Role,
@@ -46,7 +48,7 @@ export interface PermioOptions {
   /** Custom fetch, e.g. to add an agent or for tests. Defaults to `globalThis.fetch`. */
   fetch?: typeof globalThis.fetch;
   /**
-   * Retries for idempotent reads (Check, Get*, List*) on Unavailable or
+   * Retries for idempotent reads (Check, BatchCheck, WhoAmI, Get*, List*) on Unavailable or
    * DeadlineExceeded. A number sets `maxRetries`. Default 2. Writes are never retried.
    */
   retries?: number | RetryOptions;
@@ -154,6 +156,79 @@ export interface WhoHasAccessParams extends PageOptions, Omit<RequestOptions, "s
   project?: string;
 }
 
+export interface GrantParams extends RequestOptions {
+  /** The principal to grant to: one of your IDs, or `group(slug)` for a group. */
+  principal: string;
+  /** Resource URI of the grant, e.g. `resource("docs", id)`. It also covers every URI below it. */
+  resource: string;
+  /** A permission name. */
+  permission?: string;
+  /** Several permission names. */
+  permissions?: string[];
+  /** A role ID (see `listRoles()`). */
+  role?: string;
+  /** Several role IDs. */
+  roles?: string[];
+  /** Project of the grant. Defaults to the client's `project`. */
+  project?: string;
+}
+
+/**
+ * What to revoke. `resource` must be the exact URI of the grant: grants on
+ * ancestor URIs (or `_` wildcard URIs that match it) are left alone.
+ */
+export type RevokeParams = GrantParams;
+
+/** The kind of credential the client is using, as reported by `whoAmI()`. */
+export type PrincipalKind = "user" | "api_key" | "service_account" | "unknown";
+
+/** Access level of an API key on its project, as reported by `whoAmI()`. */
+export type ApiKeyAccessLevel = "check" | "full" | "unknown";
+
+/** The caller, as returned by `whoAmI()`. */
+export interface WhoAmI {
+  /** The caller's principal ID; for an API key, the key's ID. */
+  principalId: string;
+  /** The caller's organisation. Empty for a user who has not joined one yet. */
+  organisationId: string;
+  /** What kind of credential the client is using. */
+  kind: PrincipalKind;
+  /** The project an API key belongs to; it can only be used there. Undefined for users. */
+  project: string | undefined;
+  /**
+   * For an API key: `"check"` (checks and reads), `"full"` (also writes, grant
+   * and revoke) or `"unknown"` (its rights were changed by hand). Undefined for
+   * other credentials.
+   */
+  apiKeyAccess: ApiKeyAccessLevel | undefined;
+  /** The user's email address, when the caller is a user and has one. */
+  email: string | undefined;
+}
+
+function principalKindName(type: PrincipalType): PrincipalKind {
+  switch (type) {
+    case PrincipalType.USER:
+      return "user";
+    case PrincipalType.API_KEY:
+      return "api_key";
+    case PrincipalType.SERVICE_ACCOUNT:
+      return "service_account";
+    default:
+      return "unknown";
+  }
+}
+
+function apiKeyAccessName(access: APIKeyAccess): ApiKeyAccessLevel {
+  switch (access) {
+    case APIKeyAccess.API_KEY_ACCESS_CHECK:
+      return "check";
+    case APIKeyAccess.API_KEY_ACCESS_FULL:
+      return "full";
+    default:
+      return "unknown";
+  }
+}
+
 // Errors from the raw clients are converted to PermioError subclasses. Every
 // public RPC is unary; any streaming method would be passed through untouched.
 function wrapClient<S extends DescService>(service: S, transport: Transport): Client<S> {
@@ -180,6 +255,15 @@ function pick(one: string | undefined, many: string[] | undefined, what: string)
   const values = unique([...(one !== undefined ? [one] : []), ...(many ?? [])]);
   if (values.length === 0) throw new PermioValidationError(`permio: at least one ${what} is required`);
   if (values.length > 100) throw new PermioValidationError(`permio: at most 100 ${what}s per check`);
+  return values;
+}
+
+function names(one: string | undefined, many: string[] | undefined, what: string): string[] {
+  if (many !== undefined && !Array.isArray(many)) throw new PermioValidationError(`permio: ${what}s must be an array`);
+  const values = unique([...(one !== undefined ? [one] : []), ...(many ?? [])]);
+  for (const v of values) {
+    if (typeof v !== "string" || v === "") throw new PermioValidationError(`permio: ${what}s must be non-empty strings`);
+  }
   return values;
 }
 
@@ -502,5 +586,77 @@ export class Permio {
       out.push(toAccessEntry(p));
     }
     return out;
+  }
+
+  /**
+   * Grants permissions and roles to `principal` on `resource`, and so on every
+   * resource below it. Additive: what the principal already holds there is
+   * kept, and granting something it already holds changes nothing. Pass
+   * `group(slug)` as `principal` to grant to every member of a group.
+   *
+   * Like every write, a grant is sent once and never retried automatically.
+   *
+   * @throws PermioValidationError if a permission or role does not exist in the
+   *   project, or the input is malformed.
+   * @throws PermioPermissionError unless the API key has full access.
+   */
+  async grant(params: GrantParams): Promise<void> {
+    const req = this.grantRequest(params);
+    await this.permissions.grantUserPermissionsAndRolesOnResource(req, Permio.callOptions(params));
+  }
+
+  /**
+   * Removes permissions and roles from `principal`'s grant on exactly
+   * `resource`. Names the grant does not hold are ignored, so revoking twice is
+   * harmless. Grants on ancestor URIs are not touched, so the principal may
+   * still pass `check()` on `resource` afterwards; `whoHasAccess()` shows where
+   * access comes from.
+   *
+   * Like every write, a revoke is sent once and never retried automatically.
+   *
+   * @throws PermioPermissionError unless the API key has full access.
+   */
+  async revoke(params: RevokeParams): Promise<void> {
+    const req = this.grantRequest(params);
+    await this.permissions.revokeUserPermissionsAndRolesOnResource(req, Permio.callOptions(params));
+  }
+
+  private grantRequest(params: GrantParams) {
+    if (typeof params?.principal !== "string" || params.principal === "") {
+      throw new PermioValidationError("permio: principal is required");
+    }
+    assertResourceUri(params.resource);
+    const permissions = names(params.permission, params.permissions, "permission");
+    const roles = names(params.role, params.roles, "role");
+    if (permissions.length === 0 && roles.length === 0) {
+      throw new PermioValidationError("permio: at least one permission or role is required");
+    }
+    return {
+      projectName: this.resolveProject(params.project),
+      userId: params.principal,
+      resourceUri: params.resource,
+      permissions,
+      roles,
+    };
+  }
+
+  /**
+   * Describes the credential this client uses: for an API key, its ID, its
+   * organisation, the project it belongs to and its access level. Useful to
+   * verify a key at startup. Needs no `project`.
+   *
+   * @throws PermioAuthError if the key is unknown or invalidated.
+   */
+  async whoAmI(options: RequestOptions = {}): Promise<WhoAmI> {
+    const res = await this.permissions.whoAmI({}, Permio.callOptions(options));
+    const kind = principalKindName(res.principalType);
+    return {
+      principalId: res.principalId,
+      organisationId: res.organisationId,
+      kind,
+      project: res.projectName || undefined,
+      apiKeyAccess: kind === "api_key" ? apiKeyAccessName(res.apiKeyAccess) : undefined,
+      email: res.email || undefined,
+    };
   }
 }
