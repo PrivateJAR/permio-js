@@ -6,6 +6,17 @@ All notable changes to this package are documented here. The format follows
 
 ## Unreleased
 
+### Added
+
+- `permio.grant()` and `permio.revoke()`: grant or revoke permissions and roles
+  on a resource URI. Like every write, they are sent once and never retried.
+- `permio.whoAmI()`: describes the key in use (ID, organisation, project and
+  access level). `WhoAmI` is retried like the other reads.
+- The live test (`test/live.test.ts`) is now an integration test of grant,
+  check, batch check, list access, revoke, groups and error mapping. It runs
+  whenever `PERMIO_API_KEY` is set (against the dev API by default), and in CI
+  when the `PERMIO_DEV_API_KEY` secret is available.
+
 ### Changed
 
 - The package is now licensed under Apache-2.0 (previously MIT). Releases up

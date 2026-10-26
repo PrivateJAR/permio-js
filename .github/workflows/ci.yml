@@ -49,3 +49,40 @@ jobs:
         with:
           node-version: 18
       - run: node scripts/smoke-dist.mjs && node scripts/smoke-dist.cjs
+
+  # Runs test/live.test.ts against the dev API (DEV_BASE_URL) when the
+  # PERMIO_DEV_API_KEY secret is available, and is skipped otherwise (for
+  # example on pull requests from forks). The test writes fixed sdk-it-js-*
+  # IDs, so runs are serialised.
+  integration:
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    concurrency:
+      group: permio-js-integration
+      cancel-in-progress: false
+    steps:
+      - name: Check for the dev API key
+        id: key
+        env:
+          HAS_KEY: ${{ secrets.PERMIO_DEV_API_KEY != '' }}
+        run: |
+          if [ "$HAS_KEY" != "true" ]; then
+            echo "::warning::PERMIO_DEV_API_KEY is not available; skipping the integration test."
+          fi
+          echo "enabled=$HAS_KEY" >> "$GITHUB_OUTPUT"
+      - uses: useblacksmith/checkout@v1
+        if: steps.key.outputs.enabled == 'true'
+      - uses: actions/setup-node@v6
+        if: steps.key.outputs.enabled == 'true'
+        with:
+          node-version: 24
+          cache: npm
+      - if: steps.key.outputs.enabled == 'true'
+        run: npm ci
+      - name: Integration test against the dev API
+        if: steps.key.outputs.enabled == 'true'
+        env:
+          PERMIO_API_KEY: ${{ secrets.PERMIO_DEV_API_KEY }}
+        run: |
+          npx vitest run test/live.test.ts --reporter=default --reporter=json --outputFile.json=live.json
+          # Fail if the suite was skipped rather than run.
+          node -e 'const r = require("./live.json"); if (!(r.numPassedTests > 0)) { console.error("integration test did not run"); process.exit(1); }'
