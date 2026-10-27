@@ -155,6 +155,26 @@ export class PermioTimeoutError extends PermioError {
 }
 
 /**
+ * A collect-all call (`whoHasAccess`, `listAccess`) found more results than
+ * its `maxResults` cap (default 10,000). Fetching stops as soon as the cap is
+ * exceeded. Stream the results with the `…Iter` form instead
+ * (`whoHasAccessIter`, `listAccessIter`), or raise `maxResults`. Not an API
+ * error, so `code` is undefined.
+ */
+export class PermioTooManyResultsError extends PermioError {
+  override name = "PermioTooManyResultsError";
+  /** The cap that was exceeded. */
+  readonly maxResults: number;
+
+  constructor(method: string, maxResults: number) {
+    super(
+      `permio: ${method} found more than ${maxResults} results; use ${method}Iter() to stream them, or raise maxResults`,
+    );
+    this.maxResults = maxResults;
+  }
+}
+
+/**
  * Thrown by `assert()` when the principal does not hold the requested
  * permissions. This is a normal authorization outcome, not an API failure, so
  * `code` is undefined.

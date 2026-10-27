@@ -1,3 +1,4 @@
+import type { DescMessage } from "@bufbuild/protobuf";
 import { Code, ConnectError, type Transport } from "@connectrpc/connect";
 import { serverRetryDelayMs } from "./errors.js";
 
@@ -18,6 +19,8 @@ export interface ResilienceOptions {
   apiKey: string;
   /** Per-attempt timeout in ms; 0 disables it. */
   timeoutMs: number;
+  /** Per-attempt timeout in ms for list pages (RPCs with a `pagination` request field); 0 disables it. */
+  listTimeoutMs: number;
   retry: Required<RetryOptions>;
 }
 
@@ -62,6 +65,11 @@ const RETRYABLE_CODES = new Set([Code.Unavailable, Code.DeadlineExceeded]);
 /** Whether the SDK retries this RPC (by fully qualified `package.Service.Method` name). */
 export function isIdempotentMethod(typeName: string): boolean {
   return IDEMPOTENT_METHODS.has(typeName);
+}
+
+/** Whether an RPC returns one page of a list: its request has a `pagination` field. */
+function isListMethod(input: DescMessage): boolean {
+  return input.field["pagination"] !== undefined;
 }
 
 /** Returns a signal that aborts when `parent` aborts, or with `timeoutError()` after `ms` (0 = never). */
@@ -150,12 +158,13 @@ export function withResilience(inner: Transport, opts: ResilienceOptions): Trans
         () => new ConnectError(`deadline of ${timeoutMs}ms exceeded`, Code.DeadlineExceeded),
       );
       const retries = isIdempotentMethod(method.parent.typeName + "." + method.name) ? opts.retry.maxRetries : 0;
+      const attemptTimeoutMs = isListMethod(method.input) ? opts.listTimeoutMs : opts.timeoutMs;
       try {
         for (let attempt = 0; ; attempt++) {
           const attemptSignal = linkedSignal(
             overall.signal,
-            opts.timeoutMs,
-            () => new ConnectError(`request timed out after ${opts.timeoutMs}ms`, Code.DeadlineExceeded),
+            attemptTimeoutMs,
+            () => new ConnectError(`request timed out after ${attemptTimeoutMs}ms`, Code.DeadlineExceeded),
           );
           try {
             return await raceAbort(

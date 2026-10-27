@@ -12,6 +12,10 @@ export {
   type BatchCheckEntry,
   type ListAccessParams,
   type WhoHasAccessParams,
+  type ListAccessIterParams,
+  type WhoHasAccessIterParams,
+  DEFAULT_MAX_RESULTS,
+  DEFAULT_MAX_BATCH_RESOURCES,
   type GrantParams,
   type RevokeParams,
   type WhoAmI,
@@ -50,6 +54,7 @@ export {
   PermioTimeoutError,
   PermioRateLimitError,
   PermioDeniedError,
+  PermioTooManyResultsError,
   parseMissingPermissions,
   toPermioError,
   type MissingPermission,
@@ -57,7 +62,7 @@ export {
 } from "./errors.js";
 export { validateApiKey, isValidApiKey, API_KEY_LENGTH, type ApiKeyKind } from "./apikey.js";
 export { resource, encodeSegment, assertResourceUri, MAX_RESOURCE_URI_LENGTH } from "./resource.js";
-export { paginate, MAX_PAGE_SIZE, type PageOptions } from "./pagination.js";
+export { paginate, MAX_PAGE_SIZE, type PageOptions, type PaginateOptions } from "./pagination.js";
 export { isIdempotentMethod, type RetryOptions } from "./transport.js";
 export { Code } from "@connectrpc/connect";
 

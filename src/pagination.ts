@@ -10,6 +10,15 @@ export interface PageOptions {
   signal?: AbortSignal;
 }
 
+/** Options of `paginate`. */
+export interface PaginateOptions extends PageOptions {
+  /**
+   * Stops after this many items. The last page request asks only for the
+   * items still wanted, so no more than `maxItems` are ever fetched.
+   */
+  maxItems?: number;
+}
+
 interface Paginated {
   pagination?: { nextCursor: string } | undefined;
 }
@@ -30,15 +39,22 @@ interface Paginated {
 export async function* paginate<Res extends Paginated, Item>(
   fetchPage: (pagination: { limit: number; cursor?: string }, signal?: AbortSignal) => Promise<Res>,
   items: (res: Res) => Item[],
-  options: PageOptions = {},
+  options: PaginateOptions = {},
 ): AsyncGenerator<Item, void, undefined> {
-  const limit = Math.max(1, Math.min(MAX_PAGE_SIZE, Math.floor(options.pageSize ?? MAX_PAGE_SIZE)));
+  const pageSize = Math.max(1, Math.min(MAX_PAGE_SIZE, Math.floor(options.pageSize ?? MAX_PAGE_SIZE)));
+  const maxItems = options.maxItems === undefined ? Infinity : Math.max(0, Math.floor(options.maxItems));
+  let yielded = 0;
   let cursor: string | undefined;
   const seen = new Set<string>();
-  for (;;) {
+  while (yielded < maxItems) {
     options.signal?.throwIfAborted();
+    const limit = Math.min(pageSize, maxItems - yielded);
     const res = await fetchPage(cursor === undefined ? { limit } : { limit, cursor }, options.signal);
-    yield* items(res);
+    for (const item of items(res)) {
+      if (yielded >= maxItems) return;
+      yielded++;
+      yield item;
+    }
     const next = res.pagination?.nextCursor ?? "";
     // An empty cursor ends the listing. A repeated one would loop forever, and
     // stopping quietly would return a truncated listing as if it were complete.
