@@ -13,6 +13,7 @@ import { validateApiKey, type ApiKeyKind } from "./apikey.js";
 import {
   PermioConfigError,
   PermioDeniedError,
+  PermioTooManyResultsError,
   PermioValidationError,
   toPermioError,
   type MissingPermission,
@@ -45,6 +46,12 @@ export interface PermioOptions {
   project?: string;
   /** Timeout per attempt in ms. Default 10000; 0 disables it. */
   timeoutMs?: number;
+  /**
+   * Timeout per attempt in ms for each list page (`list*`, `whoHasAccess*`,
+   * `listAccess*`, `groups.list*` and raw list RPCs). Defaults to `timeoutMs`;
+   * 0 disables it. A per-call `timeoutMs` is still an overall deadline on top.
+   */
+  listTimeoutMs?: number;
   /** Custom fetch, e.g. to add an agent or for tests. Defaults to `globalThis.fetch`. */
   fetch?: typeof globalThis.fetch;
   /**
@@ -59,6 +66,11 @@ export interface PermioOptions {
    */
   transport?: Transport;
 }
+
+/** Default `maxResults` of `whoHasAccess` and `listAccess`. */
+export const DEFAULT_MAX_RESULTS = 10_000;
+/** Default `maxResources` of `batchCheck` and `batchCheckDetailed`. */
+export const DEFAULT_MAX_BATCH_RESOURCES = 10_000;
 
 /** Options accepted by every helper call. */
 export interface RequestOptions {
@@ -113,6 +125,11 @@ export interface BatchCheckParams extends RequestOptions {
    * into several `BatchCheck` calls, at most 4 in flight at once.
    */
   resources: string[];
+  /**
+   * Most resources accepted in one call, counted as given (before
+   * de-duplication). Default 10,000; more throws `PermioValidationError`.
+   */
+  maxResources?: number;
   /** A permission name. */
   permission?: string;
   /** Several permission names; a resource is allowed only with all of them. At most 100. */
@@ -130,7 +147,7 @@ export interface BatchCheckEntry {
   missing: string[];
 }
 
-export interface ListAccessParams extends PageOptions, Omit<RequestOptions, "signal"> {
+export interface ListAccessIterParams extends PageOptions, Omit<RequestOptions, "signal"> {
   /** The principal to look up. Access through roles and groups counts. */
   principal: string;
   /** The permission to look for. */
@@ -141,7 +158,7 @@ export interface ListAccessParams extends PageOptions, Omit<RequestOptions, "sig
   project?: string;
 }
 
-export interface WhoHasAccessParams extends PageOptions, Omit<RequestOptions, "signal"> {
+export interface WhoHasAccessIterParams extends PageOptions, Omit<RequestOptions, "signal"> {
   /** The resource to look at. A `_` segment here is literal. */
   resource: string;
   /**
@@ -154,6 +171,24 @@ export interface WhoHasAccessParams extends PageOptions, Omit<RequestOptions, "s
   expandGroups?: boolean;
   /** Project to look in. Defaults to the client's `project`. */
   project?: string;
+}
+
+export interface ListAccessParams extends ListAccessIterParams {
+  /**
+   * Most scopes to collect. Default 10,000; more throws
+   * `PermioTooManyResultsError` (after fetching at most `maxResults + 1`).
+   * Use `listAccessIter` to stream any number.
+   */
+  maxResults?: number;
+}
+
+export interface WhoHasAccessParams extends WhoHasAccessIterParams {
+  /**
+   * Most entries to collect. Default 10,000; more throws
+   * `PermioTooManyResultsError` (after fetching at most `maxResults + 1`).
+   * Use `whoHasAccessIter` to stream any number.
+   */
+  maxResults?: number;
 }
 
 export interface GrantParams extends RequestOptions {
@@ -251,6 +286,14 @@ function unique(values: string[]): string[] {
   return [...new Set(values)];
 }
 
+function positiveInt(value: number | undefined, fallback: number, what: string): number {
+  if (value === undefined) return fallback;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
+    throw new PermioValidationError(`permio: ${what} must be a positive integer, got ${String(value)}`);
+  }
+  return value;
+}
+
 function pick(one: string | undefined, many: string[] | undefined, what: string): string[] {
   const values = unique([...(one !== undefined ? [one] : []), ...(many ?? [])]);
   if (values.length === 0) throw new PermioValidationError(`permio: at least one ${what} is required`);
@@ -312,6 +355,7 @@ export class Permio {
       {
         apiKey: options.apiKey,
         timeoutMs: Math.max(0, options.timeoutMs ?? 10_000),
+        listTimeoutMs: Math.max(0, options.listTimeoutMs ?? options.timeoutMs ?? 10_000),
         retry: {
           maxRetries: Math.max(0, Math.floor(retry.maxRetries ?? 2)),
           baseDelayMs: Math.max(0, retry.baseDelayMs ?? 100),
@@ -486,16 +530,26 @@ export class Permio {
   async batchCheckDetailed(params: BatchCheckParams): Promise<BatchCheckEntry[]> {
     if (!params?.principal) throw new PermioValidationError("permio: principal is required");
     if (!Array.isArray(params.resources)) throw new PermioValidationError("permio: resources must be an array");
+    const maxResources = positiveInt(params.maxResources, DEFAULT_MAX_BATCH_RESOURCES, "maxResources");
+    if (params.resources.length > maxResources) {
+      throw new PermioValidationError(
+        `permio: batchCheck got ${params.resources.length} resources, more than maxResources (${maxResources}); split the call or raise maxResources`,
+      );
+    }
     const resourceUris = unique(params.resources);
     if (resourceUris.length === 0) throw new PermioValidationError("permio: at least one resource is required");
     resourceUris.forEach(assertResourceUri);
     const permissions = pick(params.permission, params.permissions, "permission");
     const projectName = this.resolveProject(params.project);
-    const chunks: string[][] = [];
-    for (let i = 0; i < resourceUris.length; i += 100) chunks.push(resourceUris.slice(i, i + 100));
-    const responses = await mapConcurrent(chunks, BATCH_CHECK_CONCURRENCY, (chunk) =>
+    // Each chunk's request is built only when a worker is free to send it.
+    const responses = await mapConcurrent(Math.ceil(resourceUris.length / BATCH_CHUNK), BATCH_CHECK_CONCURRENCY, (i) =>
       this.permissions.batchCheck(
-        { projectName, principalId: params.principal, resourceUris: chunk, permissions },
+        {
+          projectName,
+          principalId: params.principal,
+          resourceUris: resourceUris.slice(i * BATCH_CHUNK, (i + 1) * BATCH_CHUNK),
+          permissions,
+        },
         Permio.callOptions(params),
       ),
     );
@@ -519,57 +573,118 @@ export class Permio {
 
   /**
    * Answers "where may `principal` use `permission` at or below `under`?",
-   * following every page. Use the result to filter lists in your database:
-   * `coversAll` means no filter is needed, `toPrefixes()` gives path prefixes,
-   * `toRegExp()` a regex, and `allows(uri)` tests a single URI.
+   * following every page, and collects the answer. Use the result to filter
+   * lists in your database: `coversAll` means no filter is needed,
+   * `toPrefixes()` gives path prefixes, `toRegExp()` a regex, and
+   * `allows(uri)` tests a single URI.
    *
    * ```ts
    * const access = await permio.listAccess({ principal: userId, permission: "docs.read", under: "/docs" });
    * const visible = docs.filter((d) => access.allows(resource("docs", d.id)));
    * ```
    *
+   * Collects at most `maxResults` scopes (default 10,000). For more, use
+   * `listAccessIter`.
+   *
+   * @throws PermioTooManyResultsError if there are more than `maxResults` scopes.
    * @throws PermioPermissionError unless the API key has `permission.check` on
    *   `under` and `principal.assignment.get` on the principal.
    */
   async listAccess(params: ListAccessParams): Promise<AccessScopes> {
-    if (!params?.principal) throw new PermioValidationError("permio: principal is required");
-    if (!params.permission) throw new PermioValidationError("permio: permission is required");
-    assertResourceUri(params.under);
-    const projectName = this.resolveProject(params.project);
+    const maxResults = positiveInt(params?.maxResults, DEFAULT_MAX_RESULTS, "maxResults");
     let coversAll = false;
     const scopes: AccessScopeInfo[] = [];
-    for await (const page of paginate(
-      (pagination, signal) =>
-        this.permissions.listAccess(
-          { projectName, principalId: params.principal, permission: params.permission, underUri: params.under, pagination },
-          Permio.callOptions({ ...params, signal }),
-        ),
-      (res) => [res],
-      params,
-    )) {
-      if (page.coversAll) coversAll = true;
-      for (const s of page.scopes) scopes.push({ uri: s.uri, kind: scopeKindName(s.scope) });
+    for await (const s of this.listAccessPages(params, maxResults + 1, () => (coversAll = true))) {
+      if (scopes.length === maxResults) throw new PermioTooManyResultsError("listAccess", maxResults);
+      scopes.push(s);
     }
     return new AccessScopes(params.under, coversAll, scopes);
   }
 
   /**
-   * Answers "who has access to `resource`?", following every page. Lists the
-   * principals (groups included, as `group:<slug>`) with a grant on the
-   * resource, an ancestor of it, or a `_` wildcard URI matching it, ordered by
-   * principal ID, with the grants that give the access.
+   * Streams the scopes `listAccess` would collect, fetching one page at a time
+   * as you iterate, with no cap. When the principal holds `permission` on
+   * `under` itself (`coversAll`), the API returns exactly one `"subtree"` scope
+   * whose `uri` is `under`.
    *
+   * ```ts
+   * for await (const scope of permio.listAccessIter({ principal, permission: "docs.read", under: "/docs" })) { ... }
+   * ```
+   */
+  listAccessIter(params: ListAccessIterParams): AsyncGenerator<AccessScopeInfo, void, undefined> {
+    return this.listAccessPages(params, undefined, () => {});
+  }
+
+  private listAccessPages(
+    params: ListAccessIterParams,
+    maxItems: number | undefined,
+    onCoversAll: () => void,
+  ): AsyncGenerator<AccessScopeInfo, void, undefined> {
+    if (!params?.principal) throw new PermioValidationError("permio: principal is required");
+    if (!params.permission) throw new PermioValidationError("permio: permission is required");
+    assertResourceUri(params.under);
+    const projectName = this.resolveProject(params.project);
+    return paginate(
+      (pagination, signal) =>
+        this.permissions.listAccess(
+          { projectName, principalId: params.principal, permission: params.permission, underUri: params.under, pagination },
+          Permio.callOptions({ ...params, signal }),
+        ),
+      (res) => {
+        if (res.coversAll) onCoversAll();
+        return res.scopes.map((s) => ({ uri: s.uri, kind: scopeKindName(s.scope) }));
+      },
+      maxItems === undefined ? params : { ...params, maxItems },
+    );
+  }
+
+  /**
+   * Answers "who has access to `resource`?", following every page, and
+   * collects the answer. Lists the principals (groups included, as
+   * `group:<slug>`) with a grant on the resource, an ancestor of it, or a `_`
+   * wildcard URI matching it, ordered by principal ID, with the grants that
+   * give the access.
+   *
+   * A resource can have millions of principals with access, so this collects
+   * at most `maxResults` entries (default 10,000). For more, stream them with
+   * `whoHasAccessIter`.
+   *
+   * @throws PermioTooManyResultsError if there are more than `maxResults` entries.
    * @throws PermioPermissionError unless the API key has `principal.list` and
    *   `principal.assignment.list` on the project.
    */
   async whoHasAccess(params: WhoHasAccessParams): Promise<AccessEntry[]> {
+    const maxResults = positiveInt(params?.maxResults, DEFAULT_MAX_RESULTS, "maxResults");
+    const out: AccessEntry[] = [];
+    for await (const e of this.whoHasAccessPages(params, maxResults + 1)) {
+      if (out.length === maxResults) throw new PermioTooManyResultsError("whoHasAccess", maxResults);
+      out.push(e);
+    }
+    return out;
+  }
+
+  /**
+   * Streams the entries `whoHasAccess` would collect, fetching one page at a
+   * time as you iterate, with no cap.
+   *
+   * ```ts
+   * for await (const entry of permio.whoHasAccessIter({ resource: resource("docs", id) })) { ... }
+   * ```
+   */
+  whoHasAccessIter(params: WhoHasAccessIterParams): AsyncGenerator<AccessEntry, void, undefined> {
+    return this.whoHasAccessPages(params, undefined);
+  }
+
+  private whoHasAccessPages(
+    params: WhoHasAccessIterParams,
+    maxItems: number | undefined,
+  ): AsyncGenerator<AccessEntry, void, undefined> {
     assertResourceUri(params?.resource);
     if (params.permission !== undefined && params.permission === "") {
       throw new PermioValidationError("permio: permission must not be empty");
     }
     const projectName = this.resolveProject(params.project);
-    const out: AccessEntry[] = [];
-    for await (const p of paginate(
+    return paginate(
       (pagination, signal) =>
         this.permissions.listPrincipalsWithAccess(
           {
@@ -581,12 +696,9 @@ export class Permio {
           },
           Permio.callOptions({ ...params, signal }),
         ),
-      (res) => res.principals,
-      params,
-    )) {
-      out.push(toAccessEntry(p));
-    }
-    return out;
+      (res) => res.principals.map(toAccessEntry),
+      maxItems === undefined ? params : { ...params, maxItems },
+    );
   }
 
   /**
@@ -665,26 +777,29 @@ export class Permio {
 /** Most `BatchCheck` calls one `batchCheck` has in flight at once. */
 const BATCH_CHECK_CONCURRENCY = 4;
 
+/** Resource URIs per `BatchCheck` call. */
+const BATCH_CHUNK = 100;
+
 /**
- * Like `Promise.all(items.map(fn))`, with at most `limit` calls in flight.
- * Results keep the order of `items`. After the first failure no new calls start,
+ * Like `Promise.all` over `fn(0) … fn(count - 1)`, with at most `limit` calls
+ * in flight; `fn(i)` is only called when a slot is free. Results keep index order. After the first failure no new calls start,
  * and it rejects with that error.
  */
-async function mapConcurrent<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
-  const results = new Array<R>(items.length);
+async function mapConcurrent<R>(count: number, limit: number, fn: (index: number) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(count);
   let next = 0;
   let failed = false;
   async function worker(): Promise<void> {
-    while (!failed && next < items.length) {
+    while (!failed && next < count) {
       const i = next++;
       try {
-        results[i] = await fn(items[i]!);
+        results[i] = await fn(i);
       } catch (e) {
         failed = true;
         throw e;
       }
     }
   }
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  await Promise.all(Array.from({ length: Math.min(limit, count) }, worker));
   return results;
 }

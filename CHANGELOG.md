@@ -4,7 +4,33 @@ All notable changes to this package are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the package uses
 [semantic versioning](https://semver.org/).
 
-## Unreleased (0.3.0)
+## Unreleased (0.4.0)
+
+### Changed
+
+- **Behaviour change:** `whoHasAccess` and `listAccess` now collect at most
+  `maxResults` results (default 10,000) and throw the new
+  `PermioTooManyResultsError` beyond that, instead of following every page
+  into memory. They fetch at most `maxResults + 1` items before throwing. Pass
+  a larger `maxResults`, or switch to the streaming forms below.
+- **Behaviour change:** `batchCheck` / `batchCheckDetailed` accept at most
+  `maxResources` resources per call (default 10,000, counted before
+  de-duplication) and throw `PermioValidationError` above it. Chunk requests
+  are built as they are sent instead of all up front.
+
+### Added
+
+- `whoHasAccessIter()` and `listAccessIter()`: async generators that stream
+  the same entries / scopes page by page, with no cap.
+- `maxResults` on `whoHasAccess` / `listAccess`, `maxResources` on
+  `batchCheck`, and the `DEFAULT_MAX_RESULTS` / `DEFAULT_MAX_BATCH_RESOURCES`
+  constants.
+- `listTimeoutMs` client option: the per-attempt timeout for every list page
+  (any RPC with a `pagination` request field). Defaults to `timeoutMs`.
+- `paginate()` takes `maxItems`; the last page then asks only for the items
+  still wanted.
+
+## 0.3.0
 
 ### Added
 

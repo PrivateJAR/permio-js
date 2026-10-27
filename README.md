@@ -62,6 +62,7 @@ new Permio({
   baseUrl: "https://…",    // default https://api.perms.io (production)
   project: "my-app",       // default project for helpers; can be overridden per call
   timeoutMs: 10_000,       // per attempt; 0 disables
+  listTimeoutMs: 10_000,   // per attempt for each list page; defaults to timeoutMs
   retries: 2,              // or { maxRetries, baseDelayMs, maxDelayMs }
   fetch: customFetch,      // defaults to globalThis.fetch
 });
@@ -147,7 +148,10 @@ const visible = docs.filter((d) => allowed.get(resource("docs", d.id)));
 
 A resource is allowed only if the principal holds every requested permission
 on it (`permission` or `permissions`, up to 100). Duplicate resources are sent
-once; more than 100 are split into several calls, at most 4 in flight at once. When you also want to know
+once; more than 100 are split into several calls, at most 4 in flight at once.
+One call takes at most `maxResources` resources (default 10,000, counted before
+de-duplication); more throws `PermioValidationError` before anything is sent.
+When you also want to know
 what is missing, `batchCheckDetailed` returns
 `[{ resource, allowed, missing: ["docs.write"] }, ...]` in request order.
 
@@ -226,7 +230,10 @@ const access = await permio.listAccess({
 });
 ```
 
-`listAccess` follows every page and returns an `AccessScopes` object:
+`listAccess` follows every page and returns an `AccessScopes` object. It
+collects at most `maxResults` scopes (default 10,000) and throws
+`PermioTooManyResultsError` beyond that; to handle any number, stream them with
+`listAccessIter` (see [Large results](#large-results)).
 
 | Member | Meaning |
 | ------ | ------- |
@@ -321,7 +328,10 @@ For a short list you already have, `batchCheck` works too and needs only
 ## Who has access
 
 `whoHasAccess` lists the principals with a grant on a resource, on an ancestor
-of it, or on a `_` wildcard URI that matches it, following every page:
+of it, or on a `_` wildcard URI that matches it, following every page. It
+collects at most `maxResults` entries (default 10,000); a popular resource can
+have millions, so use `whoHasAccessIter` to stream them (see
+[Large results](#large-results)):
 
 ```ts
 const entries = await permio.whoHasAccess({ resource: "/docs/42", permission: "docs.read", expandGroups: true });
@@ -338,6 +348,27 @@ exactly when `check()` passes for it (directly, or through the group in
 `viaGroup`). Without it, any grant counts. `expandGroups` adds an entry for each
 member of each listed group. Entries are ordered by principal ID. The API key
 needs `principal.list` and `principal.assignment.list` on the project.
+
+## Large results
+
+`whoHasAccess` and `listAccess` collect everything into memory, so they stop at
+`maxResults` (default 10,000). When there are more, they throw
+`PermioTooManyResultsError` (with `maxResults`) after fetching at most
+`maxResults + 1` items. Either raise the cap or stream instead:
+
+```ts
+for await (const entry of permio.whoHasAccessIter({ resource: "/docs/42", permission: "docs.read" })) {
+  await notify(entry.principal);
+}
+for await (const scope of permio.listAccessIter({ principal: userId, permission: "docs.read", under: "/docs" })) {
+  // { uri, kind }. When the principal covers all of `under`, this is a single
+  // { uri: under, kind: "subtree" } scope.
+}
+```
+
+The `…Iter` forms take the same options (minus `maxResults`), fetch one page
+(`pageSize`, default 100) at a time as you iterate, and stop fetching when you
+`break`. Each page is a read RPC with the usual retries and `listTimeoutMs`.
 
 ## Express
 
@@ -412,6 +443,7 @@ status `Code`, re-exported from this package), `codeName` (for example
 | `PermioTimeoutError`     | `DeadlineExceeded`, including the SDK's own timeouts                                   |
 | `PermioRateLimitError`   | `ResourceExhausted` (HTTP 429): the organisation's check rate limit is used up. `retryAfterMs` is the server's requested delay |
 | `PermioDeniedError`      | Thrown only by `assert()` when the *principal* is not allowed; has `principal` and `missing` |
+| `PermioTooManyResultsError` | `whoHasAccess` / `listAccess` found more than `maxResults` (default 10,000). Use the `…Iter` form or raise `maxResults` |
 
 Anything else is a plain `PermioError` with the matching `code`.
 
@@ -441,8 +473,10 @@ try {
 
 Idempotent reads (`Check`, `BatchCheck`, `WhoAmI`, and every `Get*` and `List*` RPC) are retried on
 `Unavailable` and `DeadlineExceeded`, twice by default, with exponential backoff
-and jitter. Writes, including `grant` and `revoke`, are never retried. `timeoutMs` on the client applies to each
-attempt; `timeoutMs` on a call is an overall deadline. Aborting `signal` cancels
+and jitter (a retry always waits first; a timed-out list page is never retried
+immediately). Writes, including `grant` and `revoke`, are never retried. `timeoutMs` on the client applies to each
+attempt, and `listTimeoutMs` (default: `timeoutMs`) to each attempt of a list
+page; `timeoutMs` on a call is an overall deadline. Aborting `signal` cancels
 the call and any pending retry.
 
 Checks are rate limited per organisation (checks per second, by plan). When the
