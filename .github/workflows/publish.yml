@@ -35,3 +35,12 @@ jobs:
       - run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # Rebuilds perms.io, whose llms files list each SDK's latest version, and through it docs.perms.io.
+  notify-website:
+    needs: publish
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    steps:
+      - env:
+          GH_TOKEN: ${{ secrets.FACTS_DISPATCH_TOKEN }}
+        run: gh api repos/PrivateJAR/website/dispatches -f event_type=sdk-released
