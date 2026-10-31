@@ -20,6 +20,7 @@ All notable changes to this package are documented here. The format follows
 
 ### Added
 
+- Fuller npm description and keywords, and README badges.
 - `whoHasAccessIter()` and `listAccessIter()`: async generators that stream
   the same entries / scopes page by page, with no cap.
 - `maxResults` on `whoHasAccess` / `listAccess`, `maxResources` on

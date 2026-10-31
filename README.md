@@ -1,7 +1,12 @@
 # permio
 
-TypeScript SDK for [perms.io](https://perms.io), permissions as a service with
-hierarchical resource-URI RBAC.
+[![npm version](https://img.shields.io/npm/v/permio)](https://www.npmjs.com/package/permio)
+[![npm downloads](https://img.shields.io/npm/dw/permio)](https://www.npmjs.com/package/permio)
+[![license](https://img.shields.io/npm/l/permio)](LICENSE)
+
+TypeScript SDK for [perms.io](https://perms.io): RBAC and fine-grained
+authorization as a service, with permissions checked on hierarchical resource
+URIs.
 
 - One call to ask "may this principal do X on this resource?"
 - Batch checks, grant and revoke, groups, and "where can they do X?" queries that turn into database filters
@@ -615,11 +620,7 @@ hand.
 
 `.proto-version` records the proto release (tag and commit) that `src/gen/` is
 generated from. CI regenerates from that commit and fails if `src/gen/` differs,
-so update both together. When the protos are released, their release workflow
-regenerates `src/gen/`, updates `.proto-version` and opens a pull request here.
-Merging that pull request does not publish anything. To release, update the
-hand-written code, `CHANGELOG.md` and the `package.json` version as needed,
-then push a matching `vX.Y.Z` tag, which runs the npm publish workflow.
+so update both together. Releasing is described in [RELEASING.md](RELEASING.md).
 
 The integration test in `test/live.test.ts` runs only when `PERMIO_API_KEY` is
 set. It needs a full-access key, talks to the development API unless
